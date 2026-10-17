@@ -198,7 +198,7 @@ pub async fn connect(
         .await
         .map_err(|e| format!("启动 shell 失败: {e}"))?;
 
-    let (write_tx, write_rx) = mpsc::channel::<PtyCmd>(64);
+    let (write_tx, mut write_rx) = mpsc::channel::<PtyCmd>(64);
     let pipeline = Arc::new(Mutex::new(Pipeline::new()));
 
     // System probe: one line, parsed by the pipeline for LLM context.

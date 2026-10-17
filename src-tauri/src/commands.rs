@@ -11,8 +11,6 @@ use crate::ssh::known_hosts::KnownHosts;
 use crate::ssh::session::{self, SshAuth, SshConnectRequest, PtyCmd};
 use crate::state::{AppState, ConnectionConfig};
 use serde::Deserialize;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use tauri::{Emitter, State};
 
 // ---------------------------------------------------------------------------
@@ -488,45 +486,52 @@ pub async fn ai_diagnose(
     let _ = &sys_info;
 
     // Guard against concurrent diagnoses per session.
-    static DIAG_INFLIGHT: std::sync::OnceLock<std::collections::HashMap<u64, Arc<AtomicBool>>> =
+    static DIAG_INFLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
         std::sync::OnceLock::new();
-    let inflight = DIAG_INFLIGHT.get_or_init(Default::default);
-    let flag = inflight
-        .entry(session_id)
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone();
-    if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    let inflight = DIAG_INFLIGHT
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let inserted = {
+        let mut set = inflight.lock().unwrap_or_else(|e| e.into_inner());
+        set.insert(session_id)
+    };
+    if !inserted {
         return Err("已有诊断正在进行".into());
     }
-    let _guard = flag.clone();
 
-    let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
+    // Run everything fallibly first; always release the slot afterwards.
+    let outcome = (|| async {
+        let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
 
-    // run_diagnosis borrows the pipeline; do it inside a scope.
-    let app2 = app.clone();
-    let result = {
-        let p = pipeline_arc.lock().await;
-        let req = DiagnosisRequest {
-            pipeline: &p,
-            blocks: &target_blocks,
-            user_question: &question,
-        };
-        let app_for_chunks = app2.clone();
-        run_diagnosis(adapter.as_ref(), &req, &mut move |chunk| {
-            let _ = app_for_chunks.emit("ai-chunk", chunk);
-        })
-        .await
-    };
+        // run_diagnosis borrows the pipeline; do it inside a scope.
+        let result = {
+            let p = pipeline_arc.lock().await;
+            let req = DiagnosisRequest {
+                pipeline: &p,
+                blocks: &target_blocks,
+                user_question: &question,
+            };
+            let app_for_chunks = app.clone();
+            run_diagnosis(adapter.as_ref(), &req, &mut move |chunk| {
+                let _ = app_for_chunks.emit("ai-chunk", chunk);
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }?;
+        let payload = serde_json::to_value(&result).map_err(|e| e.to_string())?;
+        Ok::<serde_json::Value, String>(serde_json::json!({
+            "result": payload,
+            "provider": profile.name,
+            "model": profile.model,
+        }))
+    })()
+    .await;
 
-    flag.store(false, std::sync::atomic::Ordering::SeqCst);
-    let result = result.map_err(|e| e.to_string())?;
+    {
+        let mut set = inflight.lock().unwrap_or_else(|e| e.into_inner());
+        set.remove(&session_id);
+    }
 
-    let payload = serde_json::to_value(&result).map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({
-        "result": payload,
-        "provider": profile.name,
-        "model": profile.model,
-    }))
+    outcome
 }
 
 #[tauri::command]

@@ -97,11 +97,12 @@ pub fn build_context(
     }
 
     let text = out_lines.join("\n");
+    let estimated_tokens = estimate_tokens(&text);
     BuiltContext {
         text,
         truncated,
         fallback: false,
-        estimated_tokens: estimate_tokens(&text),
+        estimated_tokens,
     }
 }
 
