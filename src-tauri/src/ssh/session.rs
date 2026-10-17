@@ -5,14 +5,14 @@
 //! commands from an mpsc queue (user keystrokes, resize, AI pre-fill).
 
 use super::known_hosts::{KnownHosts, TofuVerdict};
-use crate::pipeline::Pipeline;
+use crate::pipeline::pipeline::Pipeline;
 use russh::client::{self, Handle};
 use russh::{ChannelMsg, Disconnect};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind")]
@@ -121,7 +121,8 @@ impl client::Handler for ClientHandler {
                 }
                 match decision {
                     Ok(Ok(true)) => {
-                        hosts.learn(&addr, &algo, &fingerprint)?;
+                        hosts.learn(&addr, &algo, &fingerprint)
+                            .map_err(|_| russh::Error::UnknownKey)?;
                         Ok(true)
                     }
                     _ => Err(russh::Error::UnknownKey),
@@ -134,6 +135,7 @@ impl client::Handler for ClientHandler {
 /// Extract (algorithm, base64 body) from a russh public key via its
 /// OpenSSH single-line representation.
 fn serialize_public_key(k: &russh_keys::key::PublicKey) -> (String, String) {
+    use russh_keys::PublicKeyBase64;
     let algo = k.name().to_string();
     let b64 = k.public_key_base64();
     (algo, b64)
@@ -319,7 +321,7 @@ async fn forward_output(
 
 /// Disconnect a session and clean up.
 pub async fn disconnect(session: &Session) {
-    if let Some(mut h) = session.handle.lock().await.take() {
+    if let Some(h) = session.handle.lock().await.take() {
         let _ = h.disconnect(Disconnect::ByApplication, "", "en").await;
     }
     let _ = session.write_tx.send(PtyCmd::Close).await;

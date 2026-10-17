@@ -23,7 +23,7 @@ pub struct KnownHostEntry {
     pub added_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HostKeyMismatch {
     pub addr: String,
     pub old_fingerprint: String,

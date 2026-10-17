@@ -78,12 +78,12 @@ impl AppState {
 
     pub fn save_profiles(&self) -> Result<(), String> {
         let profiles = self.profiles.lock().unwrap_or_else(|e| e.into_inner());
-        save_json(&self.data_dir.join("profiles.json"), &profiles)
+        save_json(&self.data_dir.join("profiles.json"), &*profiles)
     }
 
     pub fn save_connections(&self) -> Result<(), String> {
         let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
-        save_json(&self.data_dir.join("connections.json"), &conns)
+        save_json(&self.data_dir.join("connections.json"), &*conns)
     }
 
     pub fn save_whitelist(&self) -> Result<(), String> {
@@ -91,7 +91,7 @@ impl AppState {
         save_json(&self.whitelist_file, &*wl)
     }
 
-    pub fn emit(&self, event: &str, payload: impl serde::Serialize) {
+    pub fn emit(&self, event: &str, payload: impl serde::Serialize + Clone) {
         let _ = self.app.emit(event, payload);
     }
 }

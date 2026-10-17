@@ -231,7 +231,7 @@ fn strip_code_fence(s: &str) -> String {
 pub async fn run_diagnosis(
     provider: &dyn LLMProvider,
     req: &DiagnosisRequest<'_>,
-    on_chunk: &mut (dyn FnMut(&str) + Send),
+    on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
 ) -> Result<DiagnosisResult, crate::provider::error::ProviderError> {
     let messages = build_messages(req);
     let (text, _complete) = provider

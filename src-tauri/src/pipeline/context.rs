@@ -35,11 +35,11 @@ pub fn build_context(
     if error_blocks.is_empty() && user_question.trim().is_empty() {
         // No explicit error and no question: use the tail of the screen.
         let n = 30.min(screen.lines.len());
-        selected = screen.lines[screen.lines.len() - n..].to_vec();
+        selected = screen.lines.iter().skip(screen.lines.len() - n).cloned().collect();
     } else if error_blocks.is_empty() {
         // User asked a question: recent context around the end.
         let n = 40.min(screen.lines.len());
-        selected = screen.lines[screen.lines.len() - n..].to_vec();
+        selected = screen.lines.iter().skip(screen.lines.len() - n).cloned().collect();
     } else {
         // Error-focused: keep CONTEXT_MARGIN_LINES before/after each block.
         let mut keep = vec![false; screen.lines.len()];
@@ -139,6 +139,7 @@ mod tests {
 
     #[test]
     fn error_focus_keeps_margin() {
+        use crate::pipeline::errors::ErrorLevel;
         let mut screen = ScreenBuffer::new();
         for i in 0..100 {
             screen.push_line(&format!("line {i}"));
@@ -147,11 +148,18 @@ mod tests {
         for i in 0..10 {
             screen.push_line(&format!("tail {i}"));
         }
-        let blocks = screen.blocks.clone();
-        assert!(!blocks.is_empty());
+        // Error block starting at line 100 (the "E:" line), 1 line long.
+        let blocks = vec![ErrorBlock {
+            id: "t1".into(),
+            start_line: 100,
+            line_count: 1,
+            level: ErrorLevel::Red,
+            rule: "apt-error".into(),
+            preview: "E: broken package".into(),
+        }];
         let info = SystemInfo::default();
         let c = build_context(&screen, &blocks, &info, "");
         assert!(c.text.contains("E: broken package"));
-        assert!(!c.text.contains("line 5\n"));
+        assert!(!c.text.contains("line 5"));
     }
 }

@@ -10,10 +10,10 @@ use crate::safety::risk::RiskLevel;
 use crate::ssh::known_hosts::KnownHosts;
 use crate::ssh::session::{self, SshAuth, SshConnectRequest, PtyCmd};
 use crate::state::{AppState, ConnectionConfig};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 
 // ---------------------------------------------------------------------------
 // SSH
@@ -183,7 +183,7 @@ pub fn delete_connection(state: State<'_, AppState>, conn_id: String) -> Result<
 }
 
 #[tauri::command]
-pub fn has_saved_password(state: State<'_, AppState>, conn_id: String) -> Result<bool, String> {
+pub fn has_saved_password(_state: State<'_, AppState>, conn_id: String) -> Result<bool, String> {
     Ok(keyring::get_secret(&ssh_secret_key(&conn_id))?.is_some())
 }
 
@@ -283,14 +283,14 @@ pub fn delete_profile(state: State<'_, AppState>, profile_id: String) -> Result<
 }
 
 #[tauri::command]
-pub fn has_api_key(state: State<'_, AppState>, profile_id: String) -> Result<bool, String> {
+pub fn has_api_key(_state: State<'_, AppState>, profile_id: String) -> Result<bool, String> {
     Ok(keyring::get_secret(&profile_key_id(&profile_id))?.is_some())
 }
 
 /// Resolve an API key: explicit (typed in the form, not yet saved) takes
 /// precedence; otherwise load from the keychain.
 fn resolve_key(
-    state: &AppState,
+    _state: &AppState,
     profile_id: &str,
     explicit: Option<String>,
 ) -> Result<String, String> {
@@ -378,13 +378,16 @@ pub async fn prefill_command(
         "red" => RiskLevel::Red,
         _ => RiskLevel::Green,
     };
-    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    let session = sessions
-        .get(&args.session_id)
-        .ok_or("会话不存在")?
-        ;
-    let write_tx = session.write_tx.clone();
-    drop(sessions);
+    // Clone the sender inside a scoped block so the MutexGuard is provably
+    // dropped before any await (required for the command future to be Send).
+    let write_tx = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&args.session_id)
+            .ok_or("会话不存在")?
+            .write_tx
+            .clone()
+    };
 
     match prefill(&state.risk, &write_tx, &args.command, &args.ai_risk_hint, ack).await {
         Ok(a) => serde_json::to_value(&a).map_err(|e| e.to_string()),

@@ -37,7 +37,7 @@ pub trait LLMProvider: Send + Sync {
         &self,
         messages: Vec<ChatMessage>,
         opts: ChatOptions,
-        on_chunk: &mut (dyn FnMut(&str) + Send),
+        on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<(String, bool), ProviderError>;
 }
 
@@ -76,9 +76,9 @@ async fn read_sse(
     mut on_event: impl FnMut(&str),
 ) -> Result<(), ProviderError> {
     let mut buffer = String::new();
-    let mut stream = stream;
+    let mut stream = Box::pin(stream);
     loop {
-        match stream.next().await {
+        match stream.as_mut().next().await {
             Some(Ok(chunk)) => {
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 // SSE events separated by blank lines.
@@ -172,7 +172,7 @@ impl LLMProvider for OpenAIAdapter {
         &self,
         messages: Vec<ChatMessage>,
         opts: ChatOptions,
-        on_chunk: &mut (dyn FnMut(&str) + Send),
+        on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<(String, bool), ProviderError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
@@ -258,7 +258,7 @@ impl LLMProvider for AnthropicAdapter {
         &self,
         messages: Vec<ChatMessage>,
         opts: ChatOptions,
-        on_chunk: &mut (dyn FnMut(&str) + Send),
+        on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<(String, bool), ProviderError> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         // Anthropic requires system as a top-level field.
