@@ -55,9 +55,8 @@ impl AppState {
 
         // Load user whitelist into the risk engine.
         let risk = RiskEngine::default();
-        if let Some(list) = load_json_or::<Vec<String>, _>(&whitelist_file, Vec::new()).into() {
-            *risk.whitelist.lock().unwrap_or_else(|e| e.into_inner()) = list;
-        }
+        let wl_list: Vec<String> = load_json_or(&whitelist_file, Vec::new());
+        *risk.whitelist.lock().unwrap_or_else(|e| e.into_inner()) = wl_list;
 
         Self {
             app,
@@ -97,11 +96,7 @@ impl AppState {
     }
 }
 
-fn load_json_or<T, P>(path: &PathBuf, default: T) -> T
-where
-    T: serde::de::DeserializeOwned,
-    P: std::fmt::Debug,
-{
+fn load_json_or<T: serde::de::DeserializeOwned>(path: &PathBuf, default: T) -> T {
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())

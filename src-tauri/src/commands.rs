@@ -105,10 +105,17 @@ pub async fn terminal_write(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
         .map_err(|e| e.to_string())?;
-    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    let session = sessions.get(&session_id).ok_or("会话不存在")?;
-    session
-        .write_tx
+    // Clone the sender and drop the guard BEFORE awaiting: std MutexGuard
+    // must never be held across an await (future would not be Send).
+    let write_tx = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .ok_or("会话不存在")?
+            .write_tx
+            .clone()
+    };
+    write_tx
         .send(PtyCmd::Data(bytes))
         .await
         .map_err(|e| e.to_string())
@@ -121,10 +128,15 @@ pub async fn terminal_resize(
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
-    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    let session = sessions.get(&session_id).ok_or("会话不存在")?;
-    session
-        .write_tx
+    let write_tx = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .ok_or("会话不存在")?
+            .write_tx
+            .clone()
+    };
+    write_tx
         .send(PtyCmd::Resize { cols, rows })
         .await
         .map_err(|e| e.to_string())
@@ -346,6 +358,7 @@ pub fn assess_risk(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PrefillArgs {
     pub session_id: u64,
     pub command: String,
