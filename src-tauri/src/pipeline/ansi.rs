@@ -102,10 +102,12 @@ impl AnsiNormalizer {
     }
 }
 
-/// Assemble plain text into lines, handling CR overwrite within a line.
+/// Assemble plain text into lines, handling CR overwrite within a line and
+/// CRLF (which must count as a single newline, not clear + newline).
 pub struct LineAssembler {
     current: Vec<u8>,
     lines: Vec<String>,
+    pending_cr: bool,
 }
 
 impl Default for LineAssembler {
@@ -119,6 +121,7 @@ impl LineAssembler {
         Self {
             current: Vec::new(),
             lines: Vec::new(),
+            pending_cr: false,
         }
     }
 
@@ -126,12 +129,21 @@ impl LineAssembler {
         let mut completed = Vec::new();
         for &b in text {
             match b {
+                b'\r' => self.pending_cr = true,
                 b'\n' => {
+                    // CRLF or lone LF: commit the line as-is.
                     completed.push(String::from_utf8_lossy(&self.current).into_owned());
                     self.current.clear();
+                    self.pending_cr = false;
                 }
-                b'\r' => self.current.clear(), // CR overwrite semantics
-                _ => self.current.push(b),
+                _ => {
+                    if self.pending_cr {
+                        // Bare CR: terminal overwrite semantics — restart line.
+                        self.current.clear();
+                        self.pending_cr = false;
+                    }
+                    self.current.push(b);
+                }
             }
         }
         self.lines.extend(completed.iter().cloned());

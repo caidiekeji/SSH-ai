@@ -80,13 +80,14 @@ pub fn classify_line(line: &str) -> Option<ErrorFeature> {
 }
 
 /// Stack-frame heuristic: lines like "  at ..." / "File \"...\", line ..." /
-/// "  ..." rust/python/java frames extend an existing error block.
+/// indented code lines following a traceback extend the error block.
 pub fn looks_like_stack_frame(line: &str) -> bool {
     let t = line.trim_start();
     if t.is_empty() {
         return false;
     }
     (t.starts_with("at ") && line.starts_with(' '))
+        || line.starts_with(' ') // indented code/frame lines (python etc.)
         || t.starts_with("File \"")
         || t.starts_with("...")
         || t.starts_with("^")

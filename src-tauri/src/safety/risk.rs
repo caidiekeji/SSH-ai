@@ -56,6 +56,11 @@ fn blacklist() -> &'static Vec<Rule> {
                 r"rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\s+/",
                 "递归强制删除根路径，可摧毁整个系统",
             ),
+            mk(
+                "rm-flags-root",
+                r"rm\s+-\S+(\s+-\S+)*\s+/",
+                "rm 携带参数删除根路径",
+            ),
             mk("mkfs", r"mkfs\.\w+", "格式化文件系统"),
             mk(
                 "dd-disk",
@@ -239,13 +244,18 @@ impl RiskEngine {
         }
 
         // Layer 3: read-only whitelist (GREEN).
-        for r in read_rules() {
-            if r.re.is_match(cmd) {
-                return RiskAssessment {
-                    level: RiskLevel::Green,
-                    rule: r.name.to_string(),
-                    reason: r.reason.to_string(),
-                };
+        // find(1) is only read-only WITHOUT -delete / -exec; guard it.
+        let find_guarded =
+            cmd.starts_with("find ") && (cmd.contains("-delete") || cmd.contains("-exec"));
+        if !find_guarded {
+            for r in read_rules() {
+                if r.re.is_match(cmd) {
+                    return RiskAssessment {
+                        level: RiskLevel::Green,
+                        rule: r.name.to_string(),
+                        reason: r.reason.to_string(),
+                    };
+                }
             }
         }
 
