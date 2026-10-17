@@ -516,7 +516,7 @@ pub async fn ai_diagnose(
             })
             .await
             .map_err(|e| e.to_string())?
-        }?;
+        };
         let payload = serde_json::to_value(&result).map_err(|e| e.to_string())?;
         Ok::<serde_json::Value, String>(serde_json::json!({
             "result": payload,
