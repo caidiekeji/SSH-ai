@@ -30,7 +30,7 @@ pub fn build_context(
     user_question: &str,
 ) -> BuiltContext {
     let mut truncated = false;
-    let selected: Vec<String>;
+    let mut selected: Vec<String>;
 
     if error_blocks.is_empty() && user_question.trim().is_empty() {
         // No explicit error and no question: use the tail of the screen.

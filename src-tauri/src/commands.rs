@@ -444,14 +444,17 @@ pub async fn ai_diagnose(
     session_id: u64,
     question: String,
 ) -> Result<serde_json::Value, String> {
-    // Resolve the active profile + key.
-    let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
-    let profile = profiles
-        .last()
-        .cloned()
-        .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
-    drop(profiles);
-    let key = resolve_key(&state, &profile.id, None)?;
+    // Resolve the active profile + key inside a scoped block so the
+    // std::sync::MutexGuard is provably gone before the first await.
+    let (profile, key) = {
+        let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = profiles
+            .last()
+            .cloned()
+            .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+        let key = resolve_key(&state, &profile.id, None)?;
+        (profile, key)
+    };
 
     let (pipeline_arc, host) = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
