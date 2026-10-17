@@ -1,0 +1,519 @@
+//! Tauri IPC commands. Rust owns the final say on security (PRD §10.3):
+//! risk grading, prefill gating, keychain access, known-hosts — all here.
+
+use crate::ai::{parse_response, run_diagnosis, DiagnosisRequest};
+use crate::keyring_store as keyring;
+use crate::provider::specs::PROVIDER_SPECS;
+use crate::provider::{make_adapter, ProviderProfile};
+use crate::safety::prefill::{prefill, sanitize_command};
+use crate::safety::risk::RiskLevel;
+use crate::ssh::known_hosts::KnownHosts;
+use crate::ssh::session::{self, SshAuth, SshConnectRequest, PtyCmd};
+use crate::state::{AppState, ConnectionConfig};
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use tauri::State;
+
+// ---------------------------------------------------------------------------
+// SSH
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ConnectArgs {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth: SshAuth,
+    /// If true, the password/passphrase is fetched from the keychain by
+    /// connection_id; the caller never needs to know it.
+    #[serde(default)]
+    pub use_saved_password: bool,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn ssh_connect(
+    state: State<'_, AppState>,
+    args: ConnectArgs,
+) -> Result<serde_json::Value, String> {
+    let mut auth = args.auth;
+    if args.use_saved_password {
+        let conn_id = args
+            .connection_id
+            .clone()
+            .ok_or("缺少 connection_id")?;
+        let secret = keyring::get_secret(&ssh_secret_key(&conn_id))?
+            .ok_or("该连接未保存密码，请手动输入")?;
+        auth = match auth {
+            SshAuth::Password { .. } => SshAuth::Password { password: secret },
+            SshAuth::PublicKey { key_path, .. } => SshAuth::PublicKey {
+                key_path,
+                passphrase: Some(secret),
+            },
+        };
+    }
+
+    let session_id = state.next_session();
+    let req = SshConnectRequest {
+        host: args.host,
+        port: args.port,
+        username: args.username,
+        auth,
+    };
+    let session = session::connect(
+        state.app.clone(),
+        session_id,
+        req,
+        state.known_hosts_path.clone(),
+    )
+    .await?;
+
+    state
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session_id, session);
+    Ok(serde_json::json!({ "sessionId": session_id }))
+}
+
+fn ssh_secret_key(conn_id: &str) -> String {
+    format!("ssh:{conn_id}")
+}
+
+#[tauri::command]
+pub async fn ssh_disconnect(state: State<'_, AppState>, session_id: u64) -> Result<(), String> {
+    let session = state
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&session_id);
+    if let Some(s) = session {
+        session::disconnect(&s).await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn terminal_write(
+    state: State<'_, AppState>,
+    session_id: u64,
+    data_b64: String,
+) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|e| e.to_string())?;
+    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    let session = sessions.get(&session_id).ok_or("会话不存在")?;
+    session
+        .write_tx
+        .send(PtyCmd::Data(bytes))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn terminal_resize(
+    state: State<'_, AppState>,
+    session_id: u64,
+    cols: u32,
+    rows: u32,
+) -> Result<(), String> {
+    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    let session = sessions.get(&session_id).ok_or("会话不存在")?;
+    session
+        .write_tx
+        .send(PtyCmd::Resize { cols, rows })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Connections (host bookkeeping; passwords in keychain)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_connections(state: State<'_, AppState>) -> Vec<ConnectionConfig> {
+    state.connections.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[tauri::command]
+pub fn save_connection(
+    state: State<'_, AppState>,
+    conn: ConnectionConfig,
+    password: Option<String>,
+) -> Result<(), String> {
+    {
+        let mut conns = state.connections.lock().unwrap_or_else(|e| e.into_inner());
+        match conns.iter_mut().find(|c| c.id == conn.id) {
+            Some(existing) => *existing = conn.clone(),
+            None => conns.push(conn.clone()),
+        }
+    }
+    state.save_connections()?;
+    if let Some(p) = password {
+        keyring::set_secret(&ssh_secret_key(&conn.id), &p)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_connection(state: State<'_, AppState>, conn_id: String) -> Result<(), String> {
+    state
+        .connections
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|c| c.id != conn_id);
+    state.save_connections()?;
+    keyring::delete_secret(&ssh_secret_key(&conn_id))
+}
+
+#[tauri::command]
+pub fn has_saved_password(state: State<'_, AppState>, conn_id: String) -> Result<bool, String> {
+    Ok(keyring::get_secret(&ssh_secret_key(&conn_id))?.is_some())
+}
+
+// ---------------------------------------------------------------------------
+// Known hosts (TOFU management)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_known_hosts(state: State<'_, AppState>) -> Vec<serde_json::Value> {
+    let hosts = KnownHosts::load(state.known_hosts_path.clone());
+    hosts
+        .list()
+        .into_iter()
+        .map(|e| serde_json::to_value(&e).unwrap_or_default())
+        .collect()
+}
+
+#[tauri::command]
+pub fn remove_known_host(state: State<'_, AppState>, addr: String) -> Result<bool, String> {
+    let mut hosts = KnownHosts::load(state.known_hosts_path.clone());
+    hosts.remove(&addr)
+}
+
+/// Resolve a parked TOFU decision (PRD §5.2: explicit user trust required).
+#[tauri::command]
+pub async fn host_key_respond(
+    state: State<'_, AppState>,
+    addr: String,
+    fingerprint: String,
+    trust: bool,
+) -> Result<(), String> {
+    let mut pending = state.pending_hostkey.lock().await;
+    let matches = pending
+        .as_ref()
+        .map(|p| p.addr == addr && p.fingerprint == fingerprint)
+        .unwrap_or(false);
+    if matches {
+        if let Some(p) = pending.take() {
+            let _ = p.tx.send(trust);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AI providers (M2 closed loop)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_provider_specs() -> Vec<serde_json::Value> {
+    PROVIDER_SPECS
+        .iter()
+        .map(|s| serde_json::to_value(s).unwrap_or_default())
+        .collect()
+}
+
+fn profile_key_id(profile_id: &str) -> String {
+    format!("profile:{profile_id}")
+}
+
+#[tauri::command]
+pub fn list_profiles(state: State<'_, AppState>) -> Vec<ProviderProfile> {
+    state.profiles.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[tauri::command]
+pub fn save_profile(
+    state: State<'_, AppState>,
+    profile: ProviderProfile,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    {
+        let mut profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
+        match profiles.iter_mut().find(|p| p.id == profile.id) {
+            Some(existing) => *existing = profile.clone(),
+            None => profiles.push(profile.clone()),
+        }
+    }
+    state.save_profiles()?;
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            keyring::set_secret(&profile_key_id(&profile.id), key.trim())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_profile(state: State<'_, AppState>, profile_id: String) -> Result<(), String> {
+    state
+        .profiles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|p| p.id != profile_id);
+    state.save_profiles()?;
+    keyring::delete_secret(&profile_key_id(&profile_id))
+}
+
+#[tauri::command]
+pub fn has_api_key(state: State<'_, AppState>, profile_id: String) -> Result<bool, String> {
+    Ok(keyring::get_secret(&profile_key_id(&profile_id))?.is_some())
+}
+
+/// Resolve an API key: explicit (typed in the form, not yet saved) takes
+/// precedence; otherwise load from the keychain.
+fn resolve_key(
+    state: &AppState,
+    profile_id: &str,
+    explicit: Option<String>,
+) -> Result<String, String> {
+    if let Some(k) = explicit {
+        if !k.trim().is_empty() {
+            return Ok(k.trim().to_string());
+        }
+    }
+    keyring::get_secret(&profile_key_id(profile_id))?
+        .ok_or_else(|| "API Key 未配置".to_string())
+}
+
+#[tauri::command]
+pub async fn fetch_models(
+    state: State<'_, AppState>,
+    profile: ProviderProfile,
+    api_key: Option<String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let key = resolve_key(&state, &profile.id, api_key)?;
+    let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
+    let models = adapter.list_models().await.map_err(|e| e.to_string())?;
+    Ok(models
+        .into_iter()
+        .map(|m| serde_json::json!({ "id": m.id }))
+        .collect())
+}
+
+#[tauri::command]
+pub async fn test_provider(
+    state: State<'_, AppState>,
+    profile: ProviderProfile,
+    api_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let key = resolve_key(&state, &profile.id, api_key)?;
+    let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
+    let messages = vec![crate::provider::adapters::ChatMessage {
+        role: "user".into(),
+        content: "回复一个字：好".into(),
+    }];
+    let mut collected = String::new();
+    let (text, _complete) = adapter
+        .chat_stream(messages, Default::default(), &mut |c| collected.push_str(c))
+        .await
+        .map_err(|e| e.to_string())?;
+    let reply = if text.is_empty() { &collected } else { &text };
+    Ok(serde_json::json!({
+        "ok": true,
+        "model": profile.model,
+        "reply": reply.chars().take(50).collect::<String>(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Risk grading & prefill (M4)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn assess_risk(
+    state: State<'_, AppState>,
+    command: String,
+    ai_risk_hint: String,
+) -> serde_json::Value {
+    let a = state.risk.assess(&command, &ai_risk_hint);
+    serde_json::to_value(&a).unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+pub struct PrefillArgs {
+    pub session_id: u64,
+    pub command: String,
+    #[serde(default)]
+    pub ai_risk_hint: String,
+    /// Highest consent level the user has given: "green"|"yellow"|"red".
+    pub user_ack: String,
+}
+
+#[tauri::command]
+pub async fn prefill_command(
+    state: State<'_, AppState>,
+    args: PrefillArgs,
+) -> Result<serde_json::Value, String> {
+    let ack = match args.user_ack.as_str() {
+        "yellow" => RiskLevel::Yellow,
+        "red" => RiskLevel::Red,
+        _ => RiskLevel::Green,
+    };
+    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    let session = sessions
+        .get(&args.session_id)
+        .ok_or("会话不存在")?
+        ;
+    let write_tx = session.write_tx.clone();
+    drop(sessions);
+
+    match prefill(&state.risk, &write_tx, &args.command, &args.ai_risk_hint, ack).await {
+        Ok(a) => serde_json::to_value(&a).map_err(|e| e.to_string()),
+        Err(e) => Err(serde_json::json!({
+            "level": e.level,
+            "message": e.message,
+        })
+        .to_string()),
+    }
+}
+
+#[tauri::command]
+pub fn list_whitelist(state: State<'_, AppState>) -> Vec<String> {
+    state
+        .risk
+        .whitelist
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+#[tauri::command]
+pub fn add_whitelist(state: State<'_, AppState>, command: String) -> Result<(), String> {
+    let cmd = sanitize_command(&command);
+    if cmd.is_empty() {
+        return Err("命令为空".into());
+    }
+    {
+        let mut wl = state.risk.whitelist.lock().unwrap_or_else(|e| e.into_inner());
+        if !wl.contains(&cmd) {
+            wl.push(cmd);
+        }
+    }
+    state.save_whitelist()
+}
+
+#[tauri::command]
+pub fn remove_whitelist(state: State<'_, AppState>, command: String) -> Result<(), String> {
+    state
+        .risk
+        .whitelist
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|c| *c != command);
+    state.save_whitelist()
+}
+
+// ---------------------------------------------------------------------------
+// AI diagnosis (M3): streams via events, returns the final result
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn ai_diagnose(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    session_id: u64,
+    question: String,
+) -> Result<serde_json::Value, String> {
+    // Resolve the active profile + key.
+    let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
+    let profile = profiles
+        .last()
+        .cloned()
+        .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+    drop(profiles);
+    let key = resolve_key(&state, &profile.id, None)?;
+
+    let (pipeline_arc, host) = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let session = sessions.get(&session_id).ok_or("会话不存在")?;
+        (session.pipeline.clone(), session.host.clone())
+    };
+
+    // Seal any open error block from the trailing partial line.
+    {
+        let mut p = pipeline_arc.lock().await;
+        let sealed = p.seal_active();
+        for ev in sealed {
+            state.emit("error-block", serde_json::json!({
+                "sessionId": session_id, "block": ev,
+            }));
+        }
+    }
+
+    let (blocks, sys_info) = {
+        let p = pipeline_arc.lock().await;
+        (p.blocks.clone(), p.system_info.clone())
+    };
+    let target_blocks: Vec<crate::pipeline::pipeline::ErrorBlock> = blocks
+        .iter()
+        .rev()
+        .take(2)
+        .rev()
+        .cloned()
+        .collect();
+
+    let _ = host; // reserved for per-host context display
+    let _ = &sys_info;
+
+    // Guard against concurrent diagnoses per session.
+    static DIAG_INFLIGHT: std::sync::OnceLock<std::collections::HashMap<u64, Arc<AtomicBool>>> =
+        std::sync::OnceLock::new();
+    let inflight = DIAG_INFLIGHT.get_or_init(Default::default);
+    let flag = inflight
+        .entry(session_id)
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .clone();
+    if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("已有诊断正在进行".into());
+    }
+    let _guard = flag.clone();
+
+    let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
+
+    // run_diagnosis borrows the pipeline; do it inside a scope.
+    let app2 = app.clone();
+    let result = {
+        let p = pipeline_arc.lock().await;
+        let req = DiagnosisRequest {
+            pipeline: &p,
+            blocks: &target_blocks,
+            user_question: &question,
+        };
+        let app_for_chunks = app2.clone();
+        run_diagnosis(adapter.as_ref(), &req, &mut move |chunk| {
+            let _ = app_for_chunks.emit("ai-chunk", chunk);
+        })
+        .await
+    };
+
+    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    let result = result.map_err(|e| e.to_string())?;
+
+    let payload = serde_json::to_value(&result).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "result": payload,
+        "provider": profile.name,
+        "model": profile.model,
+    }))
+}
+
+#[tauri::command]
+pub fn parse_preview(raw: String) -> serde_json::Value {
+    serde_json::to_value(parse_response(&raw, false)).unwrap_or_default()
+}

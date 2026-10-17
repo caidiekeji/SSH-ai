@@ -1,0 +1,39 @@
+[package]
+name = "ai-ssh-assistant"
+version = "0.1.0"
+description = "AI SSH Assistant - AI-assisted terminal diagnosis, never auto-executes"
+authors = ["you"]
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
+russh = "=0.45.0"
+russh-keys = "=0.45.0"
+async-trait = "0.1"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures = "0.3"
+bytes = "1"
+regex = "1"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+log = "0.4"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+[lib]
+name = "ai_ssh_assistant_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]

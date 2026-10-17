@@ -1,0 +1,10 @@
+# Frontend
+node_modules/
+dist/
+
+# Rust
+src-tauri/target/
+
+# Local
+*.log
+.DS_Store

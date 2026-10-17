@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/capabilities/2",
+  "identifier": "default",
+  "description": "Minimal IPC capability: core events + app commands only. No filesystem, no shell, no remote IPC.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:default",
+    "core:app:default"
+  ]
+}
