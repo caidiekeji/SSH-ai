@@ -621,13 +621,14 @@ pub fn list_prompts(state: State<'_, AppState>) -> Result<Vec<crate::state::Prom
     let out = {
         let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         if s.prompts.is_empty() && !s.system_prompt.trim().is_empty() {
-            s.prompts.push(crate::state::PromptEntry {
+            let legacy = crate::state::PromptEntry {
                 id: new_prompt_id(),
                 name: "默认提示词".into(),
                 content: s.system_prompt.clone(),
                 for_diag: s.prompt_for_diag,
                 for_chat: s.prompt_for_chat,
-            });
+            };
+            s.prompts.push(legacy);
             needs_save = true;
         }
         s.prompts.clone()
