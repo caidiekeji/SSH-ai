@@ -396,18 +396,27 @@ function AiSettings({ onClose }: { onClose: () => void }) {
 
 function AiAdvanced() {
   const [sysPrompt, setSysPrompt] = useState("");
+  const [sysForDiag, setSysForDiag] = useState(true);
+  const [sysForChat, setSysForChat] = useState(true);
   const [sysSaved, setSysSaved] = useState(false);
   const [sysBusy, setSysBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    ipc.getSystemPrompt().then(setSysPrompt).catch(() => {});
+    ipc
+      .getSystemPrompt()
+      .then((r) => {
+        setSysPrompt(r.prompt);
+        setSysForDiag(r.forDiag);
+        setSysForChat(r.forChat);
+      })
+      .catch(() => {});
   }, []);
   const saveSysPrompt = async () => {
     setSysBusy(true);
     setSysSaved(false);
     try {
-      await ipc.setSystemPrompt(sysPrompt);
+      await ipc.setSystemPrompt(sysPrompt, sysForDiag, sysForChat);
       setSysSaved(true);
       setTimeout(() => setSysSaved(false), 2500);
     } catch (e) {
@@ -441,7 +450,7 @@ function AiAdvanced() {
       <section className="set-section">
         <h3 className="set-title">系统提示词（可选）</h3>
         <div className="dim-note" style={{ marginBottom: 8 }}>
-          自定义 AI 的回答风格，例如「把我的大白话转成专业命令并解释」。它会叠加在内置诊断规则之前，内置的输出格式与安全规则始终生效。留空使用默认。
+          自定义 AI 的回答风格，例如「把我的大白话转成专业命令并解释」。保存时勾选要应用的模式；内置的输出格式与安全规则始终生效。留空使用默认。
         </div>
         <textarea
           className="sys-prompt-input"
@@ -453,8 +462,18 @@ function AiAdvanced() {
           spellCheck={false}
         />
         <div className="sys-prompt-foot">
+          <div className="prompt-mode-checks">
+            <label className="check-chip">
+              <input type="checkbox" checked={sysForDiag} onChange={(e) => setSysForDiag(e.target.checked)} />
+              应用到诊断
+            </label>
+            <label className="check-chip">
+              <input type="checkbox" checked={sysForChat} onChange={(e) => setSysForChat(e.target.checked)} />
+              应用到对话
+            </label>
+          </div>
           <span className="dim-note">{sysPrompt.length}/2000{sysSaved ? " · 已保存" : ""}</span>
-          <button className="primary small" disabled={sysBusy} onClick={saveSysPrompt}>
+          <button className="primary small" disabled={sysBusy || (!sysForDiag && !sysForChat)} onClick={saveSysPrompt}>
             {sysBusy ? "保存中…" : "保存提示词"}
           </button>
         </div>

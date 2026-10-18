@@ -58,6 +58,8 @@ export interface DiagnosisCard {
   streamingText: string;
   result?: DiagnosisResult;
   error?: string;
+  /** How many recent terminal output blocks were sent to the AI. */
+  blocksSent?: number;
 }
 
 export interface ErrorBlockEvent {

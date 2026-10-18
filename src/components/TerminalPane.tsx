@@ -110,6 +110,9 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
 
     const blockSub = listen<{ sessionId: number; block: never }>("error-block", (ev) => {
       if (ev.payload.sessionId !== sessionId) return;
+      // Quick-error chips belong to the ACTIVE session only; background
+      // tabs keep their blocks in the backend pipeline for diagnosis.
+      if (useStore.getState().activeTabId !== sessionId) return;
       addErrorBlock(ev.payload.block);
     });
 

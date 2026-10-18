@@ -528,10 +528,7 @@ pub async fn ai_diagnose(
                 pipeline: &p,
                 blocks: &target_blocks,
                 user_question: &question,
-                custom_prompt: {
-                    let sp = state.system_prompt();
-                    if sp.is_empty() { None } else { Some(sp) }
-                },
+                custom_prompt: state.diag_prompt(),
             };
             let app_for_chunks = app.clone();
             run_diagnosis(adapter.as_ref(), &req, &mut move |chunk| {
@@ -545,6 +542,7 @@ pub async fn ai_diagnose(
             "result": payload,
             "provider": profile.name,
             "model": profile.model,
+            "blocksSent": target_blocks.len(),
         }))
     })()
     .await;
@@ -596,10 +594,7 @@ pub async fn ai_chat(
 
     let chat_result = async {
         let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
-        let custom = {
-            let sp = state.system_prompt();
-            if sp.is_empty() { None } else { Some(sp) }
-        };
+        let custom = state.chat_prompt();
         let app_for_chunks = app.clone();
         run_chat(
             adapter.as_ref(),
@@ -623,17 +618,36 @@ pub async fn ai_chat(
 // built-in diagnosis prompt; the built-in schema + safety rules always apply.
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-pub fn get_system_prompt(state: State<'_, AppState>) -> String {
-    state.system_prompt()
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemPromptSettings {
+    pub prompt: String,
+    pub for_diag: bool,
+    pub for_chat: bool,
 }
 
 #[tauri::command]
-pub fn set_system_prompt(state: State<'_, AppState>, prompt: String) -> Result<(), String> {
-    let trimmed = prompt.trim().to_string();
+pub fn get_system_prompt(state: State<'_, AppState>) -> SystemPromptSettings {
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+    SystemPromptSettings {
+        prompt: s.system_prompt.trim().to_string(),
+        for_diag: s.prompt_for_diag,
+        for_chat: s.prompt_for_chat,
+    }
+}
+
+#[tauri::command]
+pub fn set_system_prompt(
+    state: State<'_, AppState>,
+    prompt: String,
+    for_diag: bool,
+    for_chat: bool,
+) -> Result<(), String> {
     {
         let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
-        s.system_prompt = trimmed;
+        s.system_prompt = prompt.trim().to_string();
+        s.prompt_for_diag = for_diag;
+        s.prompt_for_chat = for_chat;
     }
     state.save_settings()
 }

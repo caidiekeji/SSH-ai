@@ -145,6 +145,8 @@ export const useStore = create<Store>((set, get) => ({
       serverInfo: null,
       files: { path: "~", entries: [] },
       fileError: "",
+      // Quick-error chips are per-session: drop blocks from other sessions.
+      errorBlocks: [],
     })),
   switchTab: (sessionId) => {
     const t = get().tabs.find((x) => x.sessionId === sessionId);
@@ -158,6 +160,7 @@ export const useStore = create<Store>((set, get) => ({
       serverInfo: null,
       files: { path: "~", entries: [] },
       fileError: "",
+      errorBlocks: [],
     });
   },
   closeTab: async (sessionId) => {
@@ -174,6 +177,7 @@ export const useStore = create<Store>((set, get) => ({
         activeHost: "",
         serverInfo: null,
         files: { path: "~", entries: [] },
+        errorBlocks: [],
       });
       return;
     }
@@ -265,7 +269,14 @@ export const useStore = create<Store>((set, get) => ({
       diagState: "T2_RESULT",
       cards: s.cards.map((c) =>
         c.id === s.streamingCardId
-          ? { ...c, streaming: false, result: payload.result, provider: payload.provider, model: payload.model }
+          ? {
+              ...c,
+              streaming: false,
+              result: payload.result,
+              provider: payload.provider,
+              model: payload.model,
+              blocksSent: (payload as { blocksSent?: number }).blocksSent,
+            }
           : c,
       ),
       streamingCardId: null,

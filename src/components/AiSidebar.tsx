@@ -318,6 +318,11 @@ function ChatMessage({ card }: { card: Card }) {
             <Icon name="copy" size={11} /> 复制全部
           </button>
           <span className="flex1" />
+          {card.blocksSent != null && (
+            <span className="blocks-note" title="本次诊断发送给 AI 的最近命令输出块数量（可在 设置 › AI 高级 调整）">
+              已分析最近 {card.blocksSent} 个输出块
+            </span>
+          )}
           <button className="mini close" onClick={() => useStore.getState().closeCard(card.id)}>关闭</button>
         </div>
       </div>

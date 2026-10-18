@@ -87,8 +87,10 @@ export const ipc = {
     invoke<string>("ai_chat", { history, question }),
 
   // ---- AI system prompt (global, optional) ----
-  getSystemPrompt: () => invoke<string>("get_system_prompt"),
-  setSystemPrompt: (prompt: string) => invoke<void>("set_system_prompt", { prompt }),
+  getSystemPrompt: () =>
+    invoke<{ prompt: string; forDiag: boolean; forChat: boolean }>("get_system_prompt"),
+  setSystemPrompt: (prompt: string, forDiag: boolean, forChat: boolean) =>
+    invoke<void>("set_system_prompt", { prompt, forDiag, forChat }),
   getDiagnosisDepth: () => invoke<number>("get_diagnosis_depth"),
   setDiagnosisDepth: (depth: number) => invoke<void>("set_diagnosis_depth", { depth }),
 
