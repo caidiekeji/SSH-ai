@@ -444,14 +444,17 @@ pub async fn ai_diagnose(
     session_id: u64,
     question: String,
 ) -> Result<serde_json::Value, String> {
-    // Resolve the active profile + key.
-    let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
-    let profile = profiles
-        .last()
-        .cloned()
-        .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
-    drop(profiles);
-    let key = resolve_key(&state, &profile.id, None)?;
+    // Resolve the active profile + key inside a scoped block so the
+    // std::sync::MutexGuard is provably gone before the first await.
+    let (profile, key) = {
+        let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = profiles
+            .last()
+            .cloned()
+            .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+        let key = resolve_key(&state, &profile.id, None)?;
+        (profile, key)
+    };
 
     let (pipeline_arc, host) = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -537,4 +540,53 @@ pub async fn ai_diagnose(
 #[tauri::command]
 pub fn parse_preview(raw: String) -> serde_json::Value {
     serde_json::to_value(parse_response(&raw, false)).unwrap_or_default()
+}
+
+/// Run a one-shot command on a fresh exec channel (NOT the PTY). Powers the
+/// server dashboard probe and explicit user-initiated file operations.
+/// This path is USER-triggered only — AI output never reaches it (HC-03).
+#[tauri::command]
+pub async fn exec_oneshot(
+    state: State<'_, AppState>,
+    session_id: u64,
+    command: String,
+) -> Result<String, String> {
+    use russh::ChannelMsg;
+    // Clone the tokio Mutex out of the map, then drop the std guard BEFORE
+    // any await so the future stays Send.
+    let handle_cell = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .map(|s| s.handle.clone())
+            .ok_or("会话不存在")?
+    };
+    let handle = handle_cell
+        .lock()
+        .await
+        .clone()
+        .ok_or("会话已断开")?;
+    let mut ch = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("打开执行通道失败: {e}"))?;
+    ch.exec(true, &command)
+        .await
+        .map_err(|e| format!("执行失败: {e}"))?;
+
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(15), ch.wait()).await {
+            Ok(Some(ChannelMsg::Data { ref data })) => out.extend_from_slice(data),
+            Ok(Some(ChannelMsg::ExtendedData { ref data, .. })) => out.extend_from_slice(data),
+            // Exit/Eof/Close/None: output complete.
+            Ok(Some(ChannelMsg::Eof))
+            | Ok(Some(ChannelMsg::Exit { .. }))
+            | Ok(Some(ChannelMsg::Close))
+            | Ok(None) => break,
+            Ok(Some(_)) => {}
+            Err(_) => break, // 15s timeout guard
+        }
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }

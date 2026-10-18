@@ -8,8 +8,8 @@ pub const CONTEXT_MARGIN_LINES: usize = 20;
 
 /// Rough token estimate: ASCII ~4 chars/token, CJK ~1 char/token.
 pub fn estimate_tokens(text: &str) -> usize {
-    let ascii = text.bytes().filter(|b| b.is_ascii()).count();
-    let non_ascii = text.len() - ascii;
+    let ascii = text.chars().filter(|c| c.is_ascii()).count();
+    let non_ascii = text.chars().count() - ascii;
     ascii / 4 + non_ascii
 }
 
@@ -30,7 +30,7 @@ pub fn build_context(
     user_question: &str,
 ) -> BuiltContext {
     let mut truncated = false;
-    let selected: Vec<String>;
+    let mut selected: Vec<String>;
 
     if error_blocks.is_empty() && user_question.trim().is_empty() {
         // No explicit error and no question: use the tail of the screen.

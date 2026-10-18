@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI SSH Assistant · UI 设计方案</title>
+<style>
+/* ============ 设计文档自身的样式 ============ */
+:root {
+  --doc-bg: #0c0e12;
+  --doc-panel: #12151b;
+  --doc-border: #242a34;
+  --doc-text: #e6edf3;
+  --doc-dim: #8b93a3;
+  --doc-accent: #4c8dff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--doc-bg);
+  color: var(--doc-text);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.7;
+  padding-bottom: 80px;
+}
+.doc { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+h1 { font-size: 28px; margin: 48px 0 8px; letter-spacing: .5px; }
+h1 .sub { display:block; font-size: 14px; color: var(--doc-dim); font-weight: 400; margin-top: 6px;}
+h2 { font-size: 20px; margin: 56px 0 16px; padding-top: 24px; border-top: 1px solid var(--doc-border); }
+h3 { font-size: 15px; margin: 28px 0 12px; color: var(--doc-accent); }
+p.lead { color: var(--doc-dim); max-width: 760px; }
+.badge { display:inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; border:1px solid var(--doc-border); color:var(--doc-dim); margin-left: 8px; vertical-align: middle;}
+.section-intro { color: var(--doc-dim); margin-bottom: 16px; max-width: 800px; }
+
+/* 色板 */
+.swatches { display: flex; flex-wrap: wrap; gap: 12px; }
+.swatch { width: 150px; border: 1px solid var(--doc-border); border-radius: 10px; overflow: hidden; background: var(--doc-panel); }
+.swatch .chip { height: 64px; }
+.swatch .meta { padding: 8px 10px; font-size: 12px; }
+.swatch .meta b { display: block; font-size: 12.5px; }
+.swatch .meta span { color: var(--doc-dim); font-family: Consolas, monospace; }
+
+/* 表格 */
+table.spec { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px;}
+table.spec th, table.spec td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--doc-border); vertical-align: top;}
+table.spec th { color: var(--doc-dim); font-weight: 600; }
+table.spec td:first-child { white-space: nowrap; font-weight: 600;}
+code.k { font-family: Consolas, "JetBrains Mono", monospace; background: #1a1f28; padding: 1px 6px; border-radius: 4px; font-size: 12px; color: #9ecbff;}
+
+/* ============ 应用界面高保真 Mockup ============ */
+.app-frame {
+  margin-top: 16px;
+  border: 1px solid #2a3038;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgb(0 0 0 / .5);
+  background: #0f1216;
+  font-size: 12.5px;
+  line-height: 1.5;
+  user-select: none;
+}
+/* -- 应用设计令牌 -- */
+.app-frame {
+  --bg: #0f1216; --panel: #161b22; --elev: #1c2128;
+  --border: #2a3038; --border-soft: #21262d;
+  --text: #e6edf3; --dim: #9198a1; --faint: #6e7681;
+  --accent: #4c8dff; --ai: #a78bfa;
+  --green: #3fb950; --yellow: #d29922; --red: #f85149;
+  --mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
+}
+/* 顶栏 */
+.a-topbar { display:flex; align-items:center; gap:12px; height:46px; padding:0 14px; background:var(--panel); border-bottom:1px solid var(--border); }
+.a-logo { display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; }
+.a-logo .dot { width:20px; height:20px; border-radius:6px; background:linear-gradient(135deg,#4c8dff,#a78bfa); display:inline-flex; align-items:center; justify-content:center; color:#fff; font-size:11px; }
+.a-profile { display:flex; align-items:center; gap:6px; background:var(--elev); border:1px solid var(--border-soft); padding:4px 10px; border-radius:8px; color:var(--dim); font-size:12px; cursor:pointer;}
+.a-profile b { color: var(--text); font-weight:500;}
+.a-conn { display:flex; align-items:center; gap:6px; color:var(--dim); font-size:12px; }
+.pill-green { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 8px var(--green);}
+.a-spacer { flex:1; }
+.a-btn { background:var(--elev); border:1px solid var(--border-soft); color:var(--text); padding:5px 12px; border-radius:8px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; gap:6px;}
+.a-btn:hover { border-color:var(--accent); }
+.a-btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600;}
+.a-btn.ai { background:linear-gradient(135deg,#4c8dff,#a78bfa); border:none; color:#fff; font-weight:600;}
+
+/* 三栏 */
+.a-body { display:flex; height: 640px; }
+/* 左栏 */
+.a-hosts { width:228px; background:var(--panel); border-right:1px solid var(--border); display:flex; flex-direction:column; }
+.a-hosts .hd { padding:12px 14px 8px; display:flex; justify-content:space-between; align-items:center; color:var(--dim); font-size:11px; letter-spacing:1px; text-transform:uppercase;}
+.a-hosts .hd span:last-child { cursor:pointer; color:var(--accent); font-size:15px; line-height:1;}
+.host-item { padding:9px 14px; display:flex; align-items:center; gap:9px; cursor:pointer; border-left:2px solid transparent; }
+.host-item:hover { background:var(--elev); }
+.host-item.active { background:var(--elev); border-left-color:var(--accent); }
+.host-dot { width:7px; height:7px; border-radius:50%; flex:none; }
+.host-item .nm { font-weight:600; font-size:12.5px; }
+.host-item .sub { color:var(--faint); font-size:11px; font-family:var(--mono); }
+.host-add { margin:10px 14px; padding:8px; border:1px dashed var(--border); border-radius:8px; text-align:center; color:var(--dim); cursor:pointer; font-size:12px;}
+.host-add:hover { color:var(--accent); border-color:var(--accent); }
+
+/* 终端区 */
+.a-term { flex:1; display:flex; flex-direction:column; min-width:0; background:var(--bg); }
+.a-tabs { display:flex; align-items:center; gap:2px; padding:6px 8px 0; background:var(--panel); border-bottom:1px solid var(--border);}
+.a-tab { padding:7px 14px; border-radius:8px 8px 0 0; color:var(--dim); font-size:12px; cursor:pointer; display:flex; gap:7px; align-items:center; border:1px solid transparent; border-bottom:none;}
+.a-tab.active { background:var(--bg); border-color:var(--border); color:var(--text);}
+.a-term-canvas { flex:1; padding:14px 18px; font-family:var(--mono); font-size:12.5px; overflow:hidden; position:relative;}
+.t-line { white-space:pre; padding-left:6px; }
+.t-line.dim { color: var(--dim); }
+.t-err { border-left:3px solid var(--red); background:rgb(248 81 73 / .07); padding-left:9px; margin-left:3px; border-radius:0 4px 4px 0;}
+.t-warn { border-left:3px solid var(--yellow); background:rgb(210 153 34 / .07); padding-left:9px; margin-left:3px; border-radius:0 4px 4px 0;}
+.t-err-bar { position:absolute; cursor:pointer; }
+.t-prompt { color: var(--green); }
+.t-cmd { color: var(--text); }
+.t-cursor { display:inline-block; width:7px; height:14px; background:var(--accent); vertical-align:-2px; animation:blink 1.1s step-end infinite;}
+@keyframes blink { 50% { opacity:0; } }
+.t-hint { position:absolute; right:16px; bottom:12px; background:var(--elev); border:1px solid var(--border); color:var(--dim); font-size:11px; padding:5px 10px; border-radius:8px; font-family:inherit;}
+.t-hint b { color: var(--accent); font-weight:600;}
+
+/* 输入行 */
+.a-input { display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--panel); border-top:1px solid var(--border); }
+.a-mode { font-size:11px; font-weight:700; padding:3px 9px; border-radius:6px; background:rgb(167 139 250 / .15); color:var(--ai); border:1px solid rgb(167 139 250/.35);}
+.a-mode.off { background:var(--elev); color:var(--faint); border-color:var(--border-soft);}
+.a-input input { flex:1; background:var(--elev); border:1px solid var(--border-soft); border-radius:9px; padding:9px 13px; color:var(--text); font-size:13px; outline:none;}
+.a-input input:focus { border-color: var(--accent); box-shadow:0 0 0 3px rgb(76 141 255 / .15);}
+.a-send { padding:9px 16px; }
+
+/* AI 侧栏 */
+.a-ai { width:318px; background:var(--panel); border-left:1px solid var(--border); display:flex; flex-direction:column;}
+.a-ai .hd { padding:12px 16px 8px; display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--dim);}
+.a-ai .hd b { color:var(--text); display:flex; align-items:center; gap:7px;}
+.ai-gem { width:16px;height:16px;border-radius:5px;background:linear-gradient(135deg,#4c8dff,#a78bfa); }
+.a-ai .list { flex:1; overflow:auto; padding: 6px 12px 12px; display:flex; flex-direction:column; gap:10px;}
+.card { background:var(--elev); border:1px solid var(--border-soft); border-radius:12px; padding:13px 14px; }
+.card .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;}
+.card .top .t { font-weight:600; font-size:12.5px; display:flex; align-items:center; gap:7px;}
+.conf { font-size:10.5px; padding:2px 8px; border-radius:999px; font-weight:600;}
+.conf.high { background:rgb(63 185 80/.15); color:var(--green); }
+.conf.med { background:rgb(210 153 34/.15); color:var(--yellow);}
+.card .rc { color:var(--dim); font-size:11.5px; margin-bottom:10px; }
+.step { display:flex; align-items:flex-start; gap:9px; padding:8px 9px; border-radius:8px; background:var(--panel); border:1px solid var(--border-soft); margin-bottom:7px;}
+.step:hover { border-color:var(--accent); }
+.riskdot { width:9px; height:9px; border-radius:50%; margin-top:5px; flex:none; }
+.riskdot.g { background:var(--green); box-shadow:0 0 6px rgb(63 185 80/.7);}
+.riskdot.y { background:var(--yellow); box-shadow:0 0 6px rgb(210 153 34/.7);}
+.riskdot.r { background:var(--red); box-shadow:0 0 6px rgb(248 81 73/.7);}
+.step .body { flex:1; min-width:0;}
+.step .d { font-size:11.5px; color:var(--text); margin-bottom:4px;}
+.step .cmd { font-family:var(--mono); font-size:11px; background:#0d1015; border:1px solid var(--border-soft); border-radius:6px; padding:4px 8px; color:#9ecbff; overflow:hidden; text-overflow:ellipsis; white-space:pre;}
+.step .ins { font-size:11px; color:var(--accent); cursor:pointer; border:1px solid var(--border); padding:3px 9px; border-radius:6px; flex:none; margin-top:2px;}
+.step .ins:hover { background:var(--accent); color:#fff; border-color:var(--accent);}
+.card .foot { display:flex; gap:8px; margin-top:8px;}
+.mini { font-size:11px; color:var(--dim); border:1px solid var(--border); padding:4px 10px; border-radius:7px; cursor:pointer;}
+.mini:hover { color:var(--text); border-color:var(--dim);}
+.card.degraded { border-style:dashed; }
+.card.degraded .raw { font-family:var(--mono); font-size:11px; color:var(--dim); background:#0d1015; border-radius:6px; padding:8px 10px; margin-bottom:8px; white-space:pre-wrap;}
+.note-warn { font-size:11px; color:var(--yellow); background:rgb(210 153 34/.08); border:1px solid rgb(210 153 34/.25); border-radius:8px; padding:6px 9px;}
+
+/* 状态机徽标行 */
+.a-ai .states { padding: 0 16px 12px; display:flex; gap:4px; flex-wrap:wrap;}
+.st { font-size:10px; font-family:var(--mono); color:var(--faint); border:1px solid var(--border-soft); padding:2px 7px; border-radius:5px;}
+.st.on { color:var(--ai); border-color:rgb(167 139 250/.4); background:rgb(167 139 250/.08);}
+
+/* ============ 组件状态展示区 ============ */
+.gallery { display:grid; grid-template-columns: repeat(auto-fit,minmax(340px,1fr)); gap:20px; margin-top:16px;}
+.g-item { background:var(--doc-panel); border:1px solid var(--doc-border); border-radius:14px; padding:20px; }
+.g-item > .cap { font-size:12.5px; color:var(--doc-dim); margin-bottom:14px; }
+.g-item > .cap b { color:var(--doc-text); display:block; font-size:13.5px; margin-bottom:3px;}
+.g-item .card { box-shadow: 0 8px 24px rgb(0 0 0/.35); }
+
+/* 红色风险弹窗 */
+.risk-red { border:1px solid rgb(248 81 73/.45); border-radius:12px; background:var(--elev); padding:16px; box-shadow:0 8px 24px rgb(0 0 0/.35);}
+.risk-red .hd { display:flex; gap:9px; align-items:center; color:var(--red); font-weight:700; margin-bottom:10px; font-size:13px;}
+.risk-red .cmd { font-family:var(--mono); font-size:12px; background:#0d1015; border:1px solid rgb(248 81 73/.4); color:#ffb4ad; padding:8px 11px; border-radius:8px; margin-bottom:10px; word-break:break-all;}
+.risk-red .rule { font-size:11.5px; color:var(--dim); margin-bottom:12px;}
+.risk-red .rule code { color:var(--red); font-family:var(--mono); background:rgb(248 81 73/.1); padding:1px 6px; border-radius:4px; font-size:11px;}
+.chk { display:flex; gap:9px; align-items:flex-start; font-size:12px; color:var(--text); margin-bottom:14px; cursor:pointer;}
+.chk .box { width:15px; height:15px; border:1.5px solid var(--red); border-radius:4px; flex:none; margin-top:2px; position:relative;}
+.chk .box.on { background:var(--red);}
+.chk .box.on::after { content:"✓"; position:absolute; inset:0; color:#fff; font-size:11px; display:flex; align-items:center; justify-content:center;}
+.risk-red .foot { display:flex; gap:10px; justify-content:flex-end;}
+.btn-danger { background:var(--red); border:none; color:#fff; font-weight:600; padding:7px 16px; border-radius:8px; font-size:12px; cursor:default; opacity:.4;}
+.btn-danger.on { opacity:1; cursor:pointer;}
+.btn-ghost { background:transparent; border:1px solid var(--border); color:var(--dim); padding:7px 16px; border-radius:8px; font-size:12px;}
+
+/* TOFU 弹窗 */
+.tofu { border:1px solid var(--accent); border-radius:12px; background:var(--elev); padding:16px; box-shadow:0 8px 24px rgb(0 0 0/.35);}
+.tofu .hd { display:flex; gap:9px; align-items:center; font-weight:700; margin-bottom:10px; font-size:13px;}
+.tofu .kv { font-size:12px; color:var(--dim); margin-bottom:6px;}
+.tofu .kv b { color:var(--text); font-family:var(--mono); font-weight:500; font-size:11.5px; word-break:break-all;}
+.tofu .warn-line { font-size:11.5px; color:var(--yellow); margin:10px 0 14px; background:rgb(210 153 34/.08); border:1px solid rgb(210 153 34/.25); border-radius:8px; padding:7px 10px;}
+
+/* Provider 配置 */
+.prov { border:1px solid var(--border-soft); border-radius:12px; background:var(--elev); padding:16px; box-shadow:0 8px 24px rgb(0 0 0/.35);}
+.prov .grid { display:grid; grid-template-columns: repeat(3,1fr); gap:8px; margin-bottom:14px;}
+.pcard { border:1px solid var(--border-soft); border-radius:9px; padding:9px 10px; cursor:pointer; }
+.pcard .n { font-size:12px; font-weight:600;}
+.pcard .m { font-size:10.5px; color:var(--faint); font-family:var(--mono);}
+.pcard.sel { border-color:var(--accent); background:rgb(76 141 255/.08);}
+.field { margin-bottom:10px;}
+.field label { display:block; font-size:11.5px; color:var(--dim); margin-bottom:5px;}
+.field .inp { background:var(--panel); border:1px solid var(--border-soft); border-radius:8px; padding:8px 11px; font-size:12px; color:var(--text); font-family:var(--mono);}
+.field .inp.ok { border-color:var(--green);}
+.s5 { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--green); margin-top:4px;}
+.s5 .bar { flex:1; display:flex; gap:3px;}
+.s5 .seg { height:4px; flex:1; border-radius:2px; background:var(--border-soft);}
+.s5 .seg.done { background:var(--green);}
+
+/* 错误色条 hover 说明 */
+.hov-demo { border:1px solid var(--border-soft); border-radius:10px; background:#0d1015; padding:10px; font-family:var(--mono); font-size:11.5px; position:relative;}
+.hov-demo .tip { position:absolute; top:-34px; left:26px; background:var(--elev); border:1px solid var(--border); padding:5px 11px; border-radius:8px; font-size:11px; color:var(--text); white-space:nowrap; box-shadow:0 6px 18px rgb(0 0 0/.4);}
+.hov-demo .tip::after { content:""; position:absolute; left:14px; top:100%; border:5px solid transparent; border-top-color:var(--border);}
+
+/* 浅色主题 */
+.app-frame.light {
+  --bg:#ffffff; --panel:#f6f8fa; --elev:#ffffff; --border:#d0d7de; --border-soft:#e4e9ee;
+  --text:#1f2328; --dim:#656d76; --faint:#8c959f; --accent:#0969da; --ai:#8250df;
+}
+.app-frame.light .t-err { background:rgb(207 34 46/.06);}
+.app-frame.light .step .cmd { background:#f6f8fa; color:#0550ae;}
+</style>
+</head>
+<body>
+<div class="doc">
+
+<h1>AI SSH Assistant · 界面设计方案<span class="sub">UI Designer（像素君）出品 · 暗色优先 / WCAG AA / 三栏终端工作台</span></h1>
+<p class="lead">设计定位：<b>终端是主角，AI 是副驾，风险是一眼可辨的红绿灯。</b>整个方案围绕 SSH 运维用户的核心习惯构建——信息密度高、键盘优先、暗色护眼、危险操作必须有摩擦。</p>
+
+<h2>一、设计原则</h2>
+<table class="spec">
+  <tr><th>原则</th><th>落地方式</th></tr>
+  <tr><td>终端即主角</td><td>终端区占据最大面积（≥55%），侧栏均可折叠；AI 元素统一用紫色系标识，与终端的蓝/绿提示区分，避免视觉抢夺</td></tr>
+  <tr><td>风险三色语言</td><td>绿=安全只读 / 黄=需确认 / 红=高危拦截，全应用（错误色条、诊断卡片、确认弹窗）复用同一套颜色语义，形成肌肉记忆</td></tr>
+  <tr><td>失败有出口</td><td>每个失败状态（API 失败、解析降级、密钥不匹配）都伴随明确的下一步动作按钮，界面无死胡同</td></tr>
+  <tr><td>键盘与效率</td><td><code class="k">#</code> 前缀即进入 AI 模式；<code class="k">Ctrl+1/2/3</code> 聚焦三栏；<code class="k">Ctrl+Enter</code> 触发分析；Esc 关闭弹层回到终端</td></tr>
+</table>
+
+<h2>二、设计令牌（Design Tokens）</h2>
+<h3>2.1 颜色系统（暗色优先）</h3>
+<p class="section-intro">中性色取自深空灰阶（参考 GitHub Dark 的低疲劳配方），全部前景色对底色对比度 ≥ 4.5:1（WCAG AA）。风险三色在暗、浅两套主题下均保持可辨识色相。</p>
+<div class="swatches">
+  <div class="swatch"><div class="chip" style="background:#0f1216"></div><div class="meta"><b>背景 base</b><span>#0F1216</span></div></div>
+  <div class="swatch"><div class="chip" style="background:#161b22"></div><div class="meta"><b>面板 panel</b><span>#161B22</span></div></div>
+  <div class="swatch"><div class="chip" style="background:#1c2128"></div><div class="meta"><b>浮层 elevated</b><span>#1C2128</span></div></div>
+  <div class="swatch"><div class="chip" style="background:#e6edf3"></div><div class="meta"><b>主文本</b><span>#E6EDF3</span></div></div>
+  <div class="swatch"><div class="chip" style="background:#9198a1"></div><div class="meta"><b>次文本</b><span>#9198A1</span></div></div>
+  <div class="swatch"><div class="chip" style="background:linear-gradient(135deg,#4c8dff,#a78bfa)"></div><div class="meta"><b>品牌渐变（AI）</b><span>#4C8DFF → #A78BFA</span></div></div>
+  <div class="swatch"><div class="chip" style="background:#3fb950"></div><div class="meta"><b>风险·绿（只读）</b><span>#3FB950</span></div></div>
+  <div class="swatch"><div class="chip" style="background:#d29922"></div><div class="meta"><b>风险·黄（确认）</b><span>#D29922</span></div></div>
+  <div class="swatch"><div class="chip" style="background:#f85149"></div><div class="meta"><b>风险·红（拦截）</b><span>#F85149</span></div></div>
+</div>
+
+<h3>2.2 排版 / 间距 / 圆角</h3>
+<table class="spec">
+  <tr><th>令牌</th><th>值</th><th>用途</th></tr>
+  <tr><td>界面字体</td><td>Segoe UI / PingFang SC / system-ui</td><td>所有 UI 文案，13px 基准，标题 600 加权</td></tr>
+  <tr><td>等宽字体</td><td>JetBrains Mono → Consolas 回退</td><td>终端、命令块、主机地址、指纹</td></tr>
+  <tr><td>间距系统</td><td>4px 基数：4 / 8 / 12 / 16 / 24</td><td>所有 padding/gap 按 4 的倍数取值</td></tr>
+  <tr><td>圆角</td><td>卡片 12px · 控件 8px · 命令块 6px</td><td>层级越高圆角越大</td></tr>
+  <tr><td>焦点态</td><td>2px 品牌蓝描边 + 15% 蓝色光晕</td><td>所有可交互元素，键盘可达</td></tr>
+</table>
+
+<h2>三、主界面高保真稿（默认工作态）</h2>
+<p class="section-intro">三栏布局：左 228px 主机列表（可折叠）· 中间弹性终端区 · 右 318px AI 侧栏（可拖拽调宽、可折叠）。顶部栏承载 Provider/Profile 切换与连接状态。演示场景：nginx 重启失败 → 错误块高亮 → AI 已给出诊断。</p>
+
+<div class="app-frame">
+  <!-- 顶栏 -->
+  <div class="a-topbar">
+    <div class="a-logo"><span class="dot">&gt;_</span>AI SSH Assistant</div>
+    <div class="a-profile">Provider：<b>DeepSeek · deepseek-chat</b> ▾</div>
+    <div class="a-conn"><span class="pill-green"></span>web-prod-01 · 已连接</div>
+    <div class="a-spacer"></div>
+    <div class="a-btn">⚙ 设置</div>
+    <div class="a-btn ai">✦ 一键诊断</div>
+  </div>
+  <div class="a-body">
+    <!-- 左栏 -->
+    <div class="a-hosts">
+      <div class="hd"><span>主机</span><span>＋</span></div>
+      <div class="host-item active"><span class="host-dot" style="background:var(--green)"></span><div><div class="nm">web-prod-01</div><div class="sub">root@10.0.0.12</div></div></div>
+      <div class="host-item"><span class="host-dot" style="background:var(--green)"></span><div><div class="nm">web-prod-02</div><div class="sub">root@10.0.0.13</div></div></div>
+      <div class="host-item"><span class="host-dot" style="background:var(--yellow)"></span><div><div class="nm">db-master</div><div class="sub">ubuntu@10.0.1.5</div></div></div>
+      <div class="host-item"><span class="host-dot" style="background:var(--faint)"></span><div><div class="nm">staging</div><div class="sub">dev@172.16.2.8</div></div></div>
+      <div class="host-add">＋ 添加主机</div>
+    </div>
+    <!-- 终端 -->
+    <div class="a-term">
+      <div class="a-tabs">
+        <div class="a-tab active"><span style="color:var(--red)">●</span> web-prod-01</div>
+        <div class="a-tab">web-prod-02</div>
+        <div class="a-tab" style="color:var(--accent)">＋</div>
+      </div>
+      <div class="a-term-canvas">
+        <div class="t-line"><span class="t-prompt">root@web-prod-01:~#</span> <span class="t-cmd">systemctl restart nginx</span></div>
+        <div class="t-line dim">Job for nginx.service failed because the control process exited with error code.</div>
+        <div class="t-line dim">See "systemctl status nginx.service" and "journalctl -xeu nginx.service" for details.</div>
+        <div class="t-err">Job for nginx.service failed...</div>
+        <div class="t-err">systemd[1]: Failed to start A high performance web server.</div>
+        <div class="t-err">nginx[23810]: nginx: [emerg] bind() to 0.0.0.0:443 failed (98: Address already in use)</div>
+        <div class="t-warn">Warning: Unit file of nginx.service changed on disk, run 'systemctl daemon-reload'</div>
+        <div class="t-line">&nbsp;</div>
+        <div class="t-line"><span class="t-prompt">root@web-prod-01:~#</span> <span class="t-cmd">ss -tlnp | grep 443</span><span class="t-cursor"></span></div>
+        <div class="t-hint">💡 AI 已定位错误块 · <b>点击右侧卡片查看诊断</b></div>
+      </div>
+      <div class="a-input">
+        <span class="a-mode">✦ AI</span>
+        <input placeholder="输入命令，或以 # 开头向 AI 提问：# 为什么 443 被占用？" value="ss -tlnp | grep 443">
+        <div class="a-btn primary a-send">执行 ⏎</div>
+      </div>
+    </div>
+    <!-- AI 侧栏 -->
+    <div class="a-ai">
+      <div class="hd"><b><span class="ai-gem"></span>AI 分析</b><span>历史 ▾</span></div>
+      <div class="states">
+        <span class="st on">T2_RESULT</span><span class="st">T0 空闲</span><span class="st">T1 分析中</span><span class="st">T3 风险确认</span><span class="st">T4 已预填</span>
+      </div>
+      <div class="list">
+        <div class="card">
+          <div class="top"><div class="t">🩺 端口 443 被占用，nginx 无法启动</div><span class="conf high">高置信</span></div>
+          <div class="rc">根因：另一个进程（疑似旧 nginx worker 未退出）仍监听 443，新实例 bind 失败。</div>
+          <div class="step">
+            <span class="riskdot g"></span>
+            <div class="body"><div class="d">1. 查看 443 端口占用进程（只读）</div><div class="cmd">ss -tlnp | grep :443</div></div>
+            <span class="ins">插入</span>
+          </div>
+          <div class="step">
+            <span class="riskdot y"></span>
+            <div class="body"><div class="d">2. 终止占用进程后重载配置（写操作）</div><div class="cmd">fuser -k 443/tcp && systemctl restart nginx</div></div>
+            <span class="ins">插入</span>
+          </div>
+          <div class="step">
+            <span class="riskdot r"></span>
+            <div class="body"><div class="d">3. 若为僵尸容器占用，强制清理（高危）</div><div class="cmd">docker rm -f $(docker ps -q --filter publish=443)</div></div>
+            <span class="ins">插入</span>
+          </div>
+          <div class="foot"><span class="mini">↻ 重新生成</span><span class="mini">⧉ 复制全部</span></div>
+        </div>
+        <div class="card degraded">
+          <div class="top"><div class="t">⚠ 上一轮分析（降级展示）</div></div>
+          <div class="raw">Traceback (most recent call last): ...模型未返回结构化 JSON...</div>
+          <div class="note-warn">当前模型未返回结构化结果，"插入"已禁用，建议在 Provider 设置中切换支持结构化输出的模型。</div>
+          <div class="foot"><span class="mini">⧉ 复制</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2>四、关键组件与状态设计</h2>
+<div class="gallery">
+
+  <div class="g-item">
+    <div class="cap"><b>红色风险确认弹窗（T3_CONFIRM_RED）</b>命中黑名单规则时出现：展示命中的规则名，必须勾选「我理解此操作的影响」才能插入；不提供任何「执行」按钮。</div>
+    <div class="app-frame" style="padding:24px; background:var(--bg);">
+      <div class="risk-red">
+        <div class="hd">⛔ 高危命令 — 已被黑名单拦截</div>
+        <div class="cmd">rm -rf /var/lib/docker</div>
+        <div class="rule">命中规则：<code>rm-rf-critical-path</code> · 递归强制删除系统关键路径，可能导致<b style="color:var(--red)">不可恢复的数据丢失</b>。AI 的风险建议已被忽略，本地规则拥有最终裁决权。</div>
+        <div class="chk"><span class="box on"></span>我理解此操作的影响，确认要将其插入输入行</div>
+        <div class="foot"><span class="btn-ghost">取消</span><span class="btn-danger on">插入（不执行）</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="g-item">
+    <div class="cap"><b>TOFU 主机密钥首次信任（§5.2）</b>首次连接展示 SHA256 指纹，必须显式点击信任；密钥不匹配时为红色硬失败弹窗，不提供任何「忽略」出口。</div>
+    <div class="app-frame" style="padding:24px; background:var(--bg);">
+      <div class="tofu">
+        <div class="hd">🔑 验证主机身份 · 10.0.0.12</div>
+        <div class="kv">密钥算法 <b>ssh-ed25519</b></div>
+        <div class="kv">SHA256 指纹 <b>SHA256:9Kx7…cF2mQ0aTvB8nR4wYzE</b></div>
+        <div class="warn-line">首次连接该主机。请核对指纹与服务器管理员一致后信任；信任后密钥变化将拒绝连接（防中间人攻击）。</div>
+        <div class="foot" style="display:flex;gap:10px;justify-content:flex-end;">
+          <span class="btn-ghost">取消</span>
+          <span class="a-btn primary">信任并连接</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="g-item">
+    <div class="cap"><b>Provider 配置（S0–S5 状态机可视化）</b>选择厂商 → 粘贴 Key → 获取模型 → 测试连通。底部五段进度条实时反映状态机位置，每个失败分支都有出口提示。</div>
+    <div class="app-frame" style="padding:24px; background:var(--bg);">
+      <div class="prov">
+        <div class="grid">
+          <div class="pcard sel"><div class="n">DeepSeek</div><div class="m">api.deepseek.com</div></div>
+          <div class="pcard"><div class="n">OpenAI</div><div class="m">api.openai.com</div></div>
+          <div class="pcard"><div class="n">智谱 GLM</div><div class="m">open.bigmodel.cn</div></div>
+        </div>
+        <div class="field"><label>API Key（存入系统凭据库，不落盘）</label><div class="inp ok">sk-••••••••••••••••••••3f2a</div></div>
+        <div class="field"><label>模型（点击「获取模型」自动拉取，404 时手动输入）</label><div class="inp">deepseek-chat ▾</div></div>
+        <div class="s5"><span style="color:var(--dim);font-size:11px;">S5 就绪</span><div class="bar"><span class="seg done"></span><span class="seg done"></span><span class="seg done"></span><span class="seg done"></span><span class="seg done"></span></div><span class="mini">✓ 测试通过</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="g-item">
+    <div class="cap"><b>错误色条 + Hover 引导（§6.2）</b>终端行左侧 3px 竖条：红=错误 / 黄=警告。Hover 显示引导，点击直接触发 T1_ANALYZING，把该错误块上下文送入 AI。</div>
+    <div class="app-frame" style="padding:24px; background:var(--bg);">
+      <div class="hov-demo">
+        <div class="tip">🔍 点击分析此错误</div>
+        <div class="t-err">E: Unable to locate package nginx-full</div>
+        <div class="t-err">E: Couldn't find any package by glob 'nginx-full'</div>
+        <div class="t-warn">W: Some index files failed to download</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<h2>五、交互规格清单（实现对照）</h2>
+<table class="spec">
+  <tr><th>场景</th><th>交互设计</th><th>对应状态机</th></tr>
+  <tr><td><code class="k">#</code> AI 模式</td><td>输入行首字符为 <code class="k">#</code> 时，左侧浮出紫色「✦ AI」徽标，占位符切换为提问引导；Enter 发起分析而非执行</td><td>T0 → T1</td></tr>
+  <tr><td>分析进行中</td><td>AI 卡片位显示流式打字动画 +「取消」按钮；顶部 Provider 下拉暂时禁用防误切</td><td>T1</td></tr>
+  <tr><td>API 失败</td><td>卡片变为错误态：错误码 + 响应体前 200 字符，附「重试」「切换 Provider」两个出口按钮</td><td>T1_FAILED → T0</td></tr>
+  <tr><td>插入命令</td><td>点「插入」→ 按风险等级走绿（直接预填）/ 黄（确认框）/ 红（勾选框）；预填后输入行命令以紫色左边条标识「来自 AI」</td><td>T3 → T4</td></tr>
+  <tr><td>预填态输入行</td><td>命令带紫色标记 + [Esc 清除] 提示；用户可自由编辑，Enter 执行后标记消失</td><td>T4 ↔ T0</td></tr>
+  <tr><td>浅色主题</td><td>同一套令牌的浅色映射（见下方预览），风险三色换用暗色友好的深色调，对比度仍满足 AA</td><td>—</td></tr>
+</table>
+
+<h2>六、浅色主题预览</h2>
+<div class="app-frame light">
+  <div class="a-topbar">
+    <div class="a-logo"><span class="dot">&gt;_</span>AI SSH Assistant</div>
+    <div class="a-profile">Provider：<b>DeepSeek · deepseek-chat</b> ▾</div>
+    <div class="a-conn"><span class="pill-green" style="background:#1a7f37;box-shadow:none;"></span>web-prod-01 · 已连接</div>
+    <div class="a-spacer"></div>
+    <div class="a-btn">⚙ 设置</div>
+    <div class="a-btn ai">✦ 一键诊断</div>
+  </div>
+  <div class="a-body" style="height:220px;">
+    <div class="a-hosts">
+      <div class="hd"><span>主机</span><span>＋</span></div>
+      <div class="host-item active"><span class="host-dot" style="background:#1a7f37"></span><div><div class="nm">web-prod-01</div><div class="sub">root@10.0.0.12</div></div></div>
+      <div class="host-item"><span class="host-dot" style="background:#1a7f37"></span><div><div class="nm">web-prod-02</div><div class="sub">root@10.0.0.13</div></div></div>
+    </div>
+    <div class="a-term">
+      <div class="a-tabs"><div class="a-tab active">web-prod-01</div><div class="a-tab">web-prod-02</div></div>
+      <div class="a-term-canvas">
+        <div class="t-line"><span class="t-prompt" style="color:#1a7f37;">root@web-prod-01:~#</span> <span class="t-cmd">systemctl restart nginx</span></div>
+        <div class="t-err" style="border-color:#cf222e;background:rgb(207 34 46/.06);color:#cf222e;">systemd[1]: Failed to start A high performance web server.</div>
+        <div class="t-warn" style="border-color:#9a6700;background:rgb(154 103 0/.07);color:#9a6700;">Warning: Unit file changed on disk</div>
+        <div class="t-line"><span class="t-prompt" style="color:#1a7f37;">root@web-prod-01:~#</span> <span class="t-cmd">ss -tlnp | grep 443</span><span class="t-cursor"></span></div>
+      </div>
+    </div>
+    <div class="a-ai">
+      <div class="hd"><b><span class="ai-gem"></span>AI 分析</b><span>历史 ▾</span></div>
+      <div class="list">
+        <div class="card">
+          <div class="top"><div class="t">🩺 端口 443 被占用</div><span class="conf high" style="background:rgb(26 127 55/.12);color:#1a7f37;">高置信</span></div>
+          <div class="step">
+            <span class="riskdot" style="background:#1a7f37;"></span>
+            <div class="body"><div class="d">1. 查看 443 端口占用（只读）</div><div class="cmd">ss -tlnp | grep :443</div></div>
+            <span class="ins">插入</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2>七、可访问性与落地说明</h2>
+<table class="spec">
+  <tr><th>项</th><th>规格</th></tr>
+  <tr><td>对比度</td><td>全部正文 ≥ 4.5:1、大字号/图标 ≥ 3:1（WCAG AA）；风险色不得作为唯一区分手段，必须伴随文字标签（如「高危」）</td></tr>
+  <tr><td>触达目标</td><td>所有按钮/行项命中区 ≥ 32×32px；输入行高度 42px</td></tr>
+  <tr><td>键盘导航</td><td>Tab 顺序：主机列表 → 终端 → AI 卡片 → 输入行；焦点环 2px 品牌蓝永不隐藏</td></tr>
+  <tr><td>动效克制</td><td>仅卡片淡入（150ms）与光标闪烁两处动效；尊重系统「减少动态效果」设置</td></tr>
+  <tr><td>落地方式</td><td>令牌对应 <code class="k">src/styles.css</code> 的 CSS 变量替换；组件结构与现有 React 组件一一对应（Topbar/HostList/TerminalPane/AiSidebar/Dialogs），可渐进式改造，无需推翻重写</td></tr>
+</table>
+
+</div>
+</body>
+</html>

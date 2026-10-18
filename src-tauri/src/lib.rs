@@ -59,6 +59,8 @@ pub fn run() {
             // Diagnosis
             commands::ai_diagnose,
             commands::parse_preview,
+            // Server dashboard (user-initiated exec, never AI-driven)
+            commands::exec_oneshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

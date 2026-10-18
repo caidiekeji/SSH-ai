@@ -5,6 +5,53 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "../store";
 import { ipc } from "../ipc";
+import type { ThemeName } from "../types";
+
+// xterm theme must match the CSS design tokens per color mode.
+export function xtermThemeFor(theme: ThemeName) {
+  switch (theme) {
+    case "light":
+      return {
+        background: "#ffffff",
+        foreground: "#1f2328",
+        cursor: "#0969da",
+        cursorAccent: "#ffffff",
+        selectionBackground: "#b6d7ff",
+      };
+    case "ocean":
+      return {
+        background: "#0b1220",
+        foreground: "#e2e8f0",
+        cursor: "#38bdf8",
+        cursorAccent: "#0b1220",
+        selectionBackground: "#1e3a5f",
+      };
+    case "forest":
+      return {
+        background: "#0c1310",
+        foreground: "#e3ece5",
+        cursor: "#34d399",
+        cursorAccent: "#0c1310",
+        selectionBackground: "#1d4034",
+      };
+    case "sakura":
+      return {
+        background: "#171015",
+        foreground: "#f2e6ec",
+        cursor: "#f472b6",
+        cursorAccent: "#171015",
+        selectionBackground: "#4a2738",
+      };
+    default:
+      return {
+        background: "#0f1216",
+        foreground: "#e6edf3",
+        cursor: "#4c8dff",
+        cursorAccent: "#0f1216",
+        selectionBackground: "#264f78",
+      };
+  }
+}
 
 export function TerminalPane() {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -17,6 +64,7 @@ export function TerminalPane() {
   const setConn = useStore((s) => s.setConn);
   const startDiagnosis = useStore((s) => s.startDiagnosis);
   const diagState = useStore((s) => s.diagState);
+  const theme = useStore((s) => s.theme);
 
   // Terminal lifecycle: recreate whenever a session id appears.
   useEffect(() => {
@@ -25,13 +73,7 @@ export function TerminalPane() {
       fontSize: 13,
       fontFamily: '"JetBrains Mono", "Cascadia Mono", Consolas, "Courier New", monospace',
       cursorBlink: true,
-      theme: {
-        background: "#0f1216",
-        foreground: "#e6edf3",
-        cursor: "#4c8dff",
-        cursorAccent: "#0f1216",
-        selectionBackground: "#264f78",
-      },
+      theme: xtermThemeFor(useStore.getState().theme),
       scrollback: 5000,
     });
     const fit = new FitAddon();
@@ -90,6 +132,11 @@ export function TerminalPane() {
     };
   }, [sessionId]);
 
+  // Keep xterm colors in sync with the app color mode.
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.theme = xtermThemeFor(theme);
+  }, [theme]);
+
   return (
     <div className="terminal-pane">
       {connStatus === "connected" ? (
@@ -101,7 +148,7 @@ export function TerminalPane() {
               ? `正在连接 ${activeHost} …`
               : connStatus === "closed"
                 ? "会话已结束。从左侧选择主机重新连接。"
-                : "尚未连接。\n选择左侧主机，或点击「+ 添加主机」。\n连接后可使用底部 # 提问，或点击「一键诊断」。"}
+                : "尚未连接。\n选择左侧主机，或点击「+ 添加主机」。\n连接后可在右侧 AI 对话面板提问，或点击「一键诊断」。"}
           </div>
         </div>
       )}
@@ -112,10 +159,10 @@ export function TerminalPane() {
           onClick={() => startDiagnosis("")}
           title="发送最近命令的输出块 + 系统上下文给 AI 分析"
         >
-          一键诊断
+          ✦ 一键诊断
         </button>
-        <span style={{ color: "var(--text-dim)" }}>
-          输入行以 # 开头 = AI 分析模式 · AI 生成命令只会写入输入行，Enter 由你按下
+        <span className="hint-text">
+          AI 生成的命令只会写入输入行，Enter 由你按下
         </span>
       </div>
     </div>

@@ -10,9 +10,12 @@ import type {
   DiagState,
   DiagnosisCard,
   ErrorBlockEvent,
+  FileEntry,
   ProviderProfile,
   ProviderSpec,
   RiskAssessment,
+  ServerInfo,
+  ThemeName,
 } from "./types";
 
 export type ConnStatus = "disconnected" | "connecting" | "connected" | "closed" | "error";
@@ -60,6 +63,19 @@ interface Store {
   cancelPrefill: () => void;
   addErrorBlock: (b: ErrorBlockEvent) => void;
   retryDiagnosis: () => Promise<void>;
+
+  // ---- theme (multi color modes) ----
+  theme: ThemeName;
+  setTheme: (t: ThemeName) => void;
+
+  // ---- server dashboard ----
+  serverInfo: ServerInfo | null;
+  serverError: string;
+  files: { path: string; entries: FileEntry[] };
+  fileError: string;
+  refreshServer: () => Promise<void>;
+  listDir: (path: string) => Promise<void>;
+  runOp: (command: string) => Promise<string>;
 }
 
 export interface DiagnosisResultPayload {
@@ -232,4 +248,97 @@ export const useStore = create<Store>((set, get) => ({
       if (exists) return {};
       return { errorBlocks: [...s.errorBlocks.slice(-50), b] };
     }),
+
+  // ---- theme ----
+  theme: (localStorage.getItem("theme") as ThemeName) || "dark",
+  setTheme: (t) => {
+    localStorage.setItem("theme", t);
+    set({ theme: t });
+  },
+
+  // ---- server dashboard ----
+  serverInfo: null,
+  serverError: "",
+  files: { path: "~", entries: [] },
+  fileError: "",
+
+  refreshServer: async () => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    // Single POSIX probe: memory / disk / load / cores / uptime.
+    const probe =
+      "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3}'; " +
+      "echo @DISK; df -B1 / | awk 'NR==2{print $2\" \"$3}'; " +
+      "echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; " +
+      "echo @CORES; nproc 2>/dev/null || echo 1; " +
+      "echo @UPTIME; uptime -p 2>/dev/null | sed 's/^up //'";
+    try {
+      const out = await ipc.execOneshot(sessionId, probe);
+      const sec = (tag: string) => {
+        const m = out.match(new RegExp(`@${tag}\\n([^\\n]*)`));
+        return m ? m[1].trim() : "";
+      };
+      const [memT, memU] = sec("MEM").split(" ").map(Number);
+      const [dskT, dskU] = sec("DISK").split(" ").map(Number);
+      const [l1, l5] = sec("LOAD").split(" ").map(Number);
+      const cores = Number(sec("CORES")) || 1;
+      set({
+        serverInfo: {
+          memTotal: memT || 0,
+          memUsed: memU || 0,
+          diskTotal: dskT || 0,
+          diskUsed: dskU || 0,
+          load1: l1 || 0,
+          load5: l5 || 0,
+          cores,
+          uptime: sec("UPTIME") || "-",
+        },
+        serverError: "",
+      });
+    } catch (e) {
+      set({ serverError: String(e) });
+    }
+  },
+
+  listDir: async (path) => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    const p = path.replace(/'/g, "'\\''");
+    // -A all-but-dotfiles, -p dir suffix, long-iso time, size + name only.
+    const probe =
+      `cd '${p}' 2>/dev/null || { echo @ERR; exit 0; }; echo "@CWD\n$(pwd)"; ` +
+      `echo "@LS"; ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'`;
+    try {
+      const out = await ipc.execOneshot(sessionId, probe);
+      if (out.startsWith("@ERR")) {
+        set({ fileError: "无法访问该目录（可能不存在或无权限）" });
+        return;
+      }
+      const cwdM = out.match(/@CWD\n([^\n]*)/);
+      const lsM = out.match(/@LS\n([\s\S]*)/);
+      const entries: FileEntry[] = [];
+      for (const line of (lsM?.[1] ?? "").split("\n")) {
+        const m = line.match(/^(\S+)\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\S+\s+\S+)\s+(.*)$/);
+        if (!m) continue;
+        const rawName = m[4];
+        const dir = rawName.endsWith("/");
+        entries.push({
+          name: dir ? rawName.slice(0, -1) : rawName.replace(/^["']|["']$/g, ""),
+          dir,
+          size: Number(m[2]),
+          mtime: m[3],
+        });
+      }
+      entries.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+      set({ files: { path: cwdM?.[1]?.trim() || path, entries }, fileError: "" });
+    } catch (e) {
+      set({ fileError: String(e) });
+    }
+  },
+
+  runOp: async (command) => {
+    const { sessionId } = get();
+    if (!sessionId) throw new Error("未连接主机");
+    return ipc.execOneshot(sessionId, command);
+  },
 }));

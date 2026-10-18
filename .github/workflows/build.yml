@@ -83,7 +83,14 @@ jobs:
         run: npm run tauri build -- --target ${{ matrix.target }}
       - name: Size gate (HC-01)
         shell: bash
-        run: node scripts/size-gate.mjs "${{ matrix.max_bundle_mb }}"
+        # Linux: gate on deb/rpm installers; AppImage self-bundles webkit2gtk
+        # (~78MB) and is excluded from the HC-01 reference metric.
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            node scripts/size-gate.mjs "35" "deb,rpm"
+          else
+            node scripts/size-gate.mjs "${{ matrix.max_bundle_mb }}"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: bundles-${{ matrix.os }}
