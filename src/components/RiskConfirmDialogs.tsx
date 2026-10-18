@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import { useStore } from "../store";
+import { Icon } from "./Icon";
 
 export function RiskConfirmDialogs() {
   const diagState = useStore((s) => s.diagState);
@@ -19,7 +20,10 @@ export function RiskConfirmDialogs() {
   return (
     <div className="modal-backdrop">
       <div className={`modal confirm-box ${isRed ? "critical" : "warn"}`}>
-        <h2>{isRed ? "🚫 高危命令" : "⚠️ 确认命令"}</h2>
+        <h2 className="confirm-title">
+          <Icon name={isRed ? "ban" : "alertTriangle"} size={16} className={isRed ? "ico-red" : "ico-yellow"} />
+          {isRed ? "高危命令" : "确认命令"}
+        </h2>
         <div className="sub">
           命中将写入 <b>{useStore.getState().activeHost || "目标主机"}</b> 的输入行。
           <br />

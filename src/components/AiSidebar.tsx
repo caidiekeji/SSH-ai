@@ -5,6 +5,7 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "../store";
 import type { DiagnosisCard as Card } from "../types";
+import { Icon } from "./Icon";
 
 export function AiSidebar() {
   const cards = useStore((s) => s.cards);
@@ -46,7 +47,7 @@ export function AiSidebar() {
     <div className="ai-sidebar chat">
       <div className="ai-head">
         <b>
-          <span className="ai-gem" /> AI 对话
+          <Icon name="sparkles" size={15} className="ai-ico" /> AI 对话
         </b>
         <ModelSwitcher />
       </div>
@@ -54,7 +55,7 @@ export function AiSidebar() {
       <div className="chat-list" ref={listRef}>
         {cards.length === 0 && (
           <div className="chat-empty">
-            <div className="ai-gem big" />
+            <Icon name="sparkles" size={30} className="ai-ico big" />
             <p>连接主机后，在这里向 AI 提问。</p>
             <p className="dim">例如："nginx 起不来怎么办？" · 或点击终端下方的「一键诊断」。</p>
           </div>
@@ -125,7 +126,7 @@ function ChatMessage({ card }: { card: Card }) {
         {card.question && <div className="bubble user">{card.question}</div>}
         <div className="dcard streaming">
           <div className="dcard-title analyzing">
-            <span className="ai-gem tiny" /> 正在分析<span className="dots">…</span>
+            <Icon name="sparkles" size={14} className="ai-ico" /> 正在分析<span className="dots">…</span>
           </div>
           <pre className="raw-text stream">{card.streamingText || "等待模型响应…"}</pre>
         </div>
@@ -137,10 +138,12 @@ function ChatMessage({ card }: { card: Card }) {
       <div className="chat-msg">
         {card.question && <div className="bubble user">{card.question}</div>}
         <div className="dcard error">
-          <div className="dcard-title">⚠ 分析失败</div>
+          <div className="dcard-title title-row">
+            <Icon name="alertTriangle" size={15} className="ico-yellow" /> 分析失败
+          </div>
           <div className="fail-body">{card.error}</div>
           <div className="dcard-foot">
-            <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}>↻ 重试</button>
+            <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}><Icon name="refresh" size={11} /> 重试</button>
             <button className="mini" onClick={() => useStore.getState().closeCard(card.id)}>关闭</button>
           </div>
         </div>
@@ -160,8 +163,8 @@ function ChatMessage({ card }: { card: Card }) {
           <pre className="raw-text">{r.raw}</pre>
           <div className="note-warn">模型未返回结构化结果，无法提供"插入"。建议在设置中更换模型。</div>
           <div className="dcard-foot">
-            <button className="mini" onClick={() => navigator.clipboard.writeText(r.raw ?? "")}>⧉ 复制</button>
-            <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}>↻ 重新生成</button>
+            <button className="mini" onClick={() => navigator.clipboard.writeText(r.raw ?? "")}><Icon name="copy" size={11} /> 复制</button>
+            <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}><Icon name="refresh" size={11} /> 重新生成</button>
             <button className="mini close" onClick={() => useStore.getState().closeCard(card.id)}>关闭</button>
           </div>
         </div>
@@ -217,12 +220,12 @@ function ChatMessage({ card }: { card: Card }) {
         )}
 
         <div className="dcard-foot">
-          <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}>↻ 重新生成</button>
+          <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}><Icon name="refresh" size={11} /> 重新生成</button>
           <button
             className="mini"
             onClick={() => navigator.clipboard.writeText(r.raw ?? JSON.stringify(r, null, 2))}
           >
-            ⧉ 复制全部
+            <Icon name="copy" size={11} /> 复制全部
           </button>
           <span className="flex1" />
           <button className="mini close" onClick={() => useStore.getState().closeCard(card.id)}>关闭</button>

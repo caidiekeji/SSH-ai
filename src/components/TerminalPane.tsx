@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useStore } from "../store";
 import { ipc } from "../ipc";
 import type { ThemeName } from "../types";
+import { Icon } from "./Icon";
 
 // xterm theme must match the CSS design tokens per color mode.
 export function xtermThemeFor(theme: ThemeName) {
@@ -159,7 +160,7 @@ export function TerminalPane() {
           onClick={() => startDiagnosis("")}
           title="发送最近命令的输出块 + 系统上下文给 AI 分析"
         >
-          ✦ 一键诊断
+          <Icon name="zap" size={12} /> 一键诊断
         </button>
         <span className="hint-text">
           AI 生成的命令只会写入输入行，Enter 由你按下

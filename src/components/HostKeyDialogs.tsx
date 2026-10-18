@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ipc } from "../ipc";
+import { Icon } from "./Icon";
 
 interface UnknownKey {
   addr: string;
@@ -59,7 +60,10 @@ export function HostKeyDialogs() {
     return (
       <div className="modal-backdrop">
         <div className="modal confirm-box critical">
-          <h2>⚠️ 主机密钥已变化 — 连接已中止</h2>
+          <h2 className="confirm-title">
+            <Icon name="alertTriangle" size={16} className="ico-red" />
+            主机密钥已变化 — 连接已中止
+          </h2>
           <div className="sub">
             {mismatch.addr} 的主机密钥与已记录的不一致。可能存在中间人攻击，也可能是主机重装了系统。
           </div>
