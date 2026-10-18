@@ -570,7 +570,7 @@ pub async fn exec_oneshot(
             .channel_open_session()
             .await
             .map_err(|e| format!("打开执行通道失败: {e}"))?;
-        ch.exec(true, &command)
+        ch.exec(true, command.as_str())
             .await
             .map_err(|e| format!("执行失败: {e}"))?;
         ch
