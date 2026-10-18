@@ -34,7 +34,7 @@ pub fn run() {
             let handle = app.handle().clone();
             let data_dir = handle.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
-            app.manage(AppState::new(handle, data_dir));
+            app.manage(AppState::new(handle.clone(), data_dir));
 
             // MCP server (external IDE agents): start if enabled in settings.
             {
