@@ -636,6 +636,7 @@ pub fn list_prompts(state: State<'_, AppState>) -> Result<Vec<crate::state::Prom
                 content: s.system_prompt.clone(),
                 for_diag: s.prompt_for_diag,
                 for_chat: s.prompt_for_chat,
+                for_agent: false,
             };
             s.prompts.push(legacy);
             needs_save = true;
