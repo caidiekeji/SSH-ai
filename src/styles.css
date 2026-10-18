@@ -386,7 +386,22 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   border-bottom: 1px solid var(--border-soft);
 }
 .ai-head b { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
-.ai-head .ai-sub { font-size: 10.5px; color: var(--faint); text-transform: none; letter-spacing: 0; }
+
+/* compact model switcher fused into the chat header */
+.model-switch {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--ai);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+  max-width: 170px;
+}
+.model-switch:hover { background: var(--ai-soft); border-color: rgba(167, 139, 250, 0.3); }
+.model-switch.none { color: var(--faint); font-family: inherit; font-weight: 500; }
 .ai-gem {
   width: 16px; height: 16px;
   border-radius: 5px;

@@ -46,7 +46,7 @@ export function AiSidebar() {
         <b>
           <span className="ai-gem" /> AI 对话
         </b>
-        <span className="ai-sub">上下文：当前终端输出</span>
+        <ModelSwitcher />
       </div>
 
       <div className="chat-list" ref={listRef}>
@@ -197,6 +197,31 @@ export function AiSidebar() {
         </button>
       </div>
     </div>
+  );
+}
+
+// Compact in-panel model switcher: shows ONLY the model name, no vendor
+// prefix or "custom" noise. Lives in the chat header (fused layout).
+function ModelSwitcher() {
+  const profiles = useStore((s) => s.profiles);
+  const activeProfileId = useStore((s) => s.activeProfileId);
+  if (!profiles.length) {
+    return <span className="model-switch none" title="在顶栏「设置」中完成 AI 配置">未配置</span>;
+  }
+  const active = profiles.find((p) => p.id === activeProfileId) ?? profiles[profiles.length - 1];
+  return (
+    <select
+      className="model-switch"
+      value={active.id}
+      onChange={(e) => useStore.setState({ activeProfileId: e.target.value })}
+      title="切换模型"
+    >
+      {profiles.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.model || p.name}
+        </option>
+      ))}
+    </select>
   );
 }
 
