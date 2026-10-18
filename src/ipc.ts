@@ -85,6 +85,8 @@ export const ipc = {
   // ---- AI system prompt (global, optional) ----
   getSystemPrompt: () => invoke<string>("get_system_prompt"),
   setSystemPrompt: (prompt: string) => invoke<void>("set_system_prompt", { prompt }),
+  getDiagnosisDepth: () => invoke<number>("get_diagnosis_depth"),
+  setDiagnosisDepth: (depth: number) => invoke<void>("set_diagnosis_depth", { depth }),
 
   // ---- Server dashboard (user-initiated exec on a separate channel) ----
   execOneshot: (sessionId: number, command: string) =>

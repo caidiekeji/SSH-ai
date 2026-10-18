@@ -249,6 +249,24 @@ function AiSettings({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // ---- diagnosis context depth (how many recent output blocks to feed AI) ----
+  const [depth, setDepth] = useState(1);
+  const [depthSaved, setDepthSaved] = useState(false);
+  useEffect(() => {
+    ipc.getDiagnosisDepth().then((d) => setDepth(d || 1)).catch(() => {});
+  }, []);
+  const changeDepth = async (v: number) => {
+    const clamped = Math.min(10, Math.max(1, Math.round(v) || 1));
+    setDepth(clamped);
+    try {
+      await ipc.setDiagnosisDepth(clamped);
+      setDepthSaved(true);
+      setTimeout(() => setDepthSaved(false), 2000);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     <>
       {/* global system prompt */}
@@ -271,6 +289,37 @@ function AiSettings({ onClose }: { onClose: () => void }) {
           <button className="primary small" disabled={sysBusy} onClick={saveSysPrompt}>
             {sysBusy ? "保存中…" : "保存提示词"}
           </button>
+        </div>
+      </section>
+
+      {/* diagnosis context depth */}
+      <section className="set-section">
+        <h3 className="set-title">诊断上下文</h3>
+        <div className="depth-row">
+          <span className="depth-label">追查前几步输出</span>
+          <div className="depth-stepper">
+            <button
+              className="depth-btn"
+              disabled={depth <= 1}
+              onClick={() => changeDepth(depth - 1)}
+              title="减少"
+            >
+              −
+            </button>
+            <span className="depth-value">{depth}</span>
+            <button
+              className="depth-btn"
+              disabled={depth >= 10}
+              onClick={() => changeDepth(depth + 1)}
+              title="增加"
+            >
+              +
+            </button>
+          </div>
+          <span className={`depth-saved ${depthSaved ? "show" : ""}`}>已保存</span>
+        </div>
+        <div className="dim-note" style={{ marginTop: 7 }}>
+          一键诊断默认只抓取<strong>最近一次</strong>命令输出进行分析；若问题可能与前几步操作有关，可增大此值，让 AI 一起查看更早的输出（最多 10 步，消耗更多 Token）。
         </div>
       </section>
 

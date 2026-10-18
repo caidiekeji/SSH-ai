@@ -490,10 +490,13 @@ pub async fn ai_diagnose(
         let p = pipeline_arc.lock().await;
         (p.blocks.clone(), p.system_info.clone())
     };
+    // Default: only the most recent command output. The configurable depth
+    // (Settings > AI) lets users include a few previous blocks for context.
+    let depth = state.diagnosis_depth() as usize;
     let target_blocks: Vec<crate::pipeline::pipeline::ErrorBlock> = blocks
         .iter()
         .rev()
-        .take(2)
+        .take(depth)
         .rev()
         .cloned()
         .collect();
@@ -575,6 +578,20 @@ pub fn set_system_prompt(state: State<'_, AppState>, prompt: String) -> Result<(
     {
         let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         s.system_prompt = trimmed;
+    }
+    state.save_settings()
+}
+
+#[tauri::command]
+pub fn get_diagnosis_depth(state: State<'_, AppState>) -> u32 {
+    state.diagnosis_depth()
+}
+
+#[tauri::command]
+pub fn set_diagnosis_depth(state: State<'_, AppState>, depth: u32) -> Result<(), String> {
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.diagnosis_depth = depth.clamp(1, 10);
     }
     state.save_settings()
 }

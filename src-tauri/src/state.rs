@@ -27,10 +27,18 @@ pub struct ConnectionConfig {
 
 /// Global app settings (non-sensitive). `system_prompt` is an optional
 /// user-written style directive prepended to the built-in diagnosis prompt.
+/// `diagnosis_depth`: how many recent command-output blocks one-click
+/// diagnosis feeds to the AI (1 = only the latest session output).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub system_prompt: String,
+    #[serde(default = "default_diagnosis_depth")]
+    pub diagnosis_depth: u32,
+}
+
+fn default_diagnosis_depth() -> u32 {
+    1
 }
 
 pub struct AppState {
@@ -111,6 +119,12 @@ impl AppState {
     pub fn system_prompt(&self) -> String {
         let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
         s.system_prompt.trim().to_string()
+    }
+
+    /// Number of recent output blocks diagnosis sends to the AI (1..=10).
+    pub fn diagnosis_depth(&self) -> u32 {
+        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.diagnosis_depth.clamp(1, 10)
     }
 
     pub fn emit(&self, event: &str, payload: impl serde::Serialize + Clone) {
