@@ -140,31 +140,32 @@ export function TerminalPane() {
 
   return (
     <div className="terminal-pane">
-      {connStatus === "connected" ? (
-        <div ref={hostRef} className="term-host" />
-      ) : (
-        <div className="terminal-empty">
-          <div>
-            {connStatus === "connecting"
-              ? `正在连接 ${activeHost} …`
-              : connStatus === "closed"
-                ? "会话已结束。从左侧选择主机重新连接。"
-                : "尚未连接。\n选择左侧主机，或点击「+ 添加主机」。\n连接后可在右侧 AI 对话面板提问，或点击「一键诊断」。"}
+      <div className="term-host-wrap">
+        {connStatus === "connected" ? (
+          <div ref={hostRef} className="term-host" />
+        ) : (
+          <div className="terminal-empty">
+            <div>
+              {connStatus === "connecting"
+                ? `正在连接 ${activeHost} …`
+                : connStatus === "closed"
+                  ? "会话已结束。从左侧选择主机重新连接。"
+                  : "尚未连接。\n选择左侧主机，或点击「+ 添加主机」。\n连接后可在右侧 AI 对话面板提问。"}
+            </div>
           </div>
-        </div>
-      )}
-      <div className="term-toolbar">
-        <button
-          className="primary"
-          disabled={connStatus !== "connected" || diagState === "T1_ANALYZING"}
-          onClick={() => startDiagnosis("")}
-          title="发送最近命令的输出块 + 系统上下文给 AI 分析"
-        >
-          <Icon name="zap" size={12} /> 一键诊断
-        </button>
-        <span className="hint-text">
-          AI 生成的命令只会写入输入行，Enter 由你按下
-        </span>
+        )}
+        {/* Floating diagnose button, bottom-right of the terminal output */}
+        {connStatus === "connected" && (
+          <button
+            className="term-fab"
+            disabled={diagState === "T1_ANALYZING"}
+            onClick={() => startDiagnosis("")}
+            title="一键诊断：发送最近命令的输出块 + 系统上下文给 AI 分析"
+          >
+            <Icon name="sparkles" size={15} className={diagState === "T1_ANALYZING" ? "spin" : ""} />
+            {diagState === "T1_ANALYZING" ? "分析中" : "一键诊断"}
+          </button>
+        )}
       </div>
     </div>
   );

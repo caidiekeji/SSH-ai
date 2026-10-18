@@ -303,15 +303,20 @@ export const useStore = create<Store>((set, get) => ({
   listDir: async (path) => {
     const { sessionId } = get();
     if (!sessionId) return;
-    const p = path.replace(/'/g, "'\\''");
+    // `~` is NOT expanded inside single quotes — expand it to $HOME explicitly.
+    // (String concat: "${...}" in a JS template would trigger interpolation.)
+    const rest = path.slice(1).replace(/'/g, "'\\''");
+    const qdir =
+      path === "~" ? '"$HOME"' : path.startsWith("~/") ? '"$HOME' + rest + '"' : "'" + path.replace(/'/g, "'\\''") + "'";
     // -A all-but-dotfiles, -p dir suffix, long-iso time, size + name only.
     const probe =
-      `cd '${p}' 2>/dev/null || { echo @ERR; exit 0; }; echo "@CWD\n$(pwd)"; ` +
+      `cd -- ${qdir} 2>/dev/null || { echo @ERR; exit 0; }; echo "@CWD\n$(pwd)"; ` +
       `echo "@LS"; ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'`;
     try {
       const out = await ipc.execOneshot(sessionId, probe);
       if (out.startsWith("@ERR")) {
-        set({ fileError: "无法访问该目录（可能不存在或无权限）" });
+        set({ fileError: "无法访问该目录（可能不存在或无权限），已保留当前目录" });
+        // Keep showing the previous (still valid) directory listing.
         return;
       }
       const cwdM = out.match(/@CWD\n([^\n]*)/);
@@ -331,6 +336,9 @@ export const useStore = create<Store>((set, get) => ({
       }
       entries.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
       set({ files: { path: cwdM?.[1]?.trim() || path, entries }, fileError: "" });
+      // Sync the path box to the resolved absolute path.
+      const resolved = cwdM?.[1]?.trim();
+      if (resolved) useStore.setState({ files: { path: resolved, entries } });
     } catch (e) {
       set({ fileError: String(e) });
     }
