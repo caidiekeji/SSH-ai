@@ -1663,3 +1663,33 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   margin-bottom: 6px;
 }
 .agent-appr-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+/* ---- detailed server IO rows (network rx/tx, disk read/write, etc.) ---- */
+.io-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  margin-top: 9px;
+}
+.io-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  padding: 5px 8px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.io-item .io-label {
+  font-family: var(--ui, inherit);
+  color: var(--faint);
+  flex-shrink: 0;
+}
+.io-item .ico-down { color: var(--accent); flex-shrink: 0; }
+.io-item .ico-up { color: var(--green); flex-shrink: 0; }

@@ -127,6 +127,9 @@ const nextCardId = () => `card-${Date.now()}-${cardSeq++}`;
 let lastQuestion = "";
 let diagRunning = false;
 
+// Previous raw byte/sector counters (for computing per-second rates).
+let lastIoRaw: { sessionId: number; rx: number; tx: number; dr: number; dw: number; t: number } | null = null;
+
 export const useStore = create<Store>((set, get) => ({
   sessionId: null,
   connStatus: "disconnected",
@@ -527,10 +530,17 @@ export const useStore = create<Store>((set, get) => ({
   refreshServer: async () => {
     const { sessionId } = get();
     if (!sessionId) return;
-    // Single POSIX probe: memory / disk / load / cores / uptime.
+    // Single POSIX probe: memory / swap / disk / load / cores / uptime /
+    // network bytes (all non-lo IFs) / root-disk sectors read+written.
     const probe =
-      "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3}'; " +
+      "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3\" \"$7}'; " +
+      "echo @SWAP; free -b | awk 'NR==3{print $2\" \"$3}'; " +
       "echo @DISK; df -B1 / | awk 'NR==2{print $2\" \"$3}'; " +
+      "echo @NET; awk 'NR>2 && $1!=\"lo:\" {rx+=$2; tx+=$10} END{print rx+0\" \"tx+0}' /proc/net/dev; " +
+      "echo @DISKIO; d=$(df / | tail -1 | awk '{print $1}' | sed 's|.*/||'); " +
+      "line=$(awk -v d=\"$d\" '$3==d{print $6\" \"$10; exit}' /proc/diskstats); " +
+      "[ -z \"$line\" ] && line=$(awk -v d=\"${d%%[0-9]*}\" '$3==d{print $6\" \"$10; exit}' /proc/diskstats); " +
+      "echo \"$line\"; " +
       "echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; " +
       "echo @CORES; nproc 2>/dev/null || echo 1; " +
       "echo @UPTIME; uptime -p 2>/dev/null | sed 's/^up //'";
@@ -540,16 +550,36 @@ export const useStore = create<Store>((set, get) => ({
         const m = out.match(new RegExp(`@${tag}\\n([^\\n]*)`));
         return m ? m[1].trim() : "";
       };
-      const [memT, memU] = sec("MEM").split(" ").map(Number);
-      const [dskT, dskU] = sec("DISK").split(" ").map(Number);
-      const [l1, l5] = sec("LOAD").split(" ").map(Number);
+      const [memT, memU, memA] = sec("MEM").split(/\s+/).map(Number);
+      const [swapT, swapU] = sec("SWAP").split(/\s+/).map(Number);
+      const [dskT, dskU] = sec("DISK").split(/\s+/).map(Number);
+      const [l1, l5] = sec("LOAD").split(/\s+/).map(Number);
       const cores = Number(sec("CORES")) || 1;
+      const [rxRaw, txRaw] = sec("NET").split(/\s+/).map(Number);
+      const [dReadRaw, dWriteRaw] = sec("DISKIO").split(/\s+/).map(Number);
+
+      // Rates: diff cumulative counters between two samples (<20s apart).
+      const now = Date.now();
+      const prev = lastIoRaw;
+      lastIoRaw = { sessionId, rx: rxRaw || 0, tx: txRaw || 0, dr: dReadRaw || 0, dw: dWriteRaw || 0, t: now };
+      const rate = (cur: number, old: number) =>
+        prev && prev.sessionId === sessionId && cur >= old && now - prev.t > 0 && now - prev.t < 20000
+          ? (cur - old) / ((now - prev.t) / 1000)
+          : 0;
+
       set({
         serverInfo: {
           memTotal: memT || 0,
           memUsed: memU || 0,
+          memAvailable: memA || 0,
+          swapTotal: swapT || 0,
+          swapUsed: swapU || 0,
           diskTotal: dskT || 0,
           diskUsed: dskU || 0,
+          diskReadRate: rate(dReadRaw || 0, prev?.dr ?? 0) * 512, // sectors → bytes
+          diskWriteRate: rate(dWriteRaw || 0, prev?.dw ?? 0) * 512,
+          netRxRate: rate(rxRaw || 0, prev?.rx ?? 0),
+          netTxRate: rate(txRaw || 0, prev?.tx ?? 0),
           load1: l1 || 0,
           load5: l5 || 0,
           cores,

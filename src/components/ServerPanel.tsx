@@ -230,8 +230,40 @@ export function ServerPanel() {
           {serverInfo && (
             <div className="stats">
               <Stat icon="activity" label="内存" pct={memPct} text={`${fmtSize(serverInfo.memUsed)} / ${fmtSize(serverInfo.memTotal)}`} />
+              {serverInfo.swapTotal > 0 && (
+                <Stat
+                  icon="hardDrive"
+                  label="交换分区"
+                  pct={serverInfo.swapTotal ? (serverInfo.swapUsed / serverInfo.swapTotal) * 100 : 0}
+                  text={`${fmtSize(serverInfo.swapUsed)} / ${fmtSize(serverInfo.swapTotal)}`}
+                />
+              )}
               <Stat icon="gauge" label="负载" pct={loadPct} text={`${serverInfo.load1.toFixed(2)} / ${serverInfo.cores} 核`} />
               <Stat icon="hardDrive" label="磁盘 /" pct={diskPct} text={`${fmtSize(serverInfo.diskUsed)} / ${fmtSize(serverInfo.diskTotal)}`} />
+              <div className="io-grid">
+                <div className="io-item" title="所有网卡合计（不含本机回环）">
+                  <Icon name="arrowDown" size={11} className="ico-down" />
+                  {fmtSize(serverInfo.netRxRate)}/s
+                  <Icon name="arrowUp" size={11} className="ico-up" />
+                  {fmtSize(serverInfo.netTxRate)}/s
+                </div>
+                <div className="io-item" title="根分区的每秒读取/写入（/proc/diskstats）">
+                  <span className="io-label">读</span>
+                  {fmtSize(serverInfo.diskReadRate)}/s
+                  <span className="io-label">写</span>
+                  {fmtSize(serverInfo.diskWriteRate)}/s
+                </div>
+                {serverInfo.memAvailable > 0 && (
+                  <div className="io-item" title="当前可供新进程使用的物理内存">
+                    <span className="io-label">可用内存</span>
+                    {fmtSize(serverInfo.memAvailable)}
+                  </div>
+                )}
+                <div className="io-item" title="5 分钟平均负载">
+                  <span className="io-label">5 分钟负载</span>
+                  {serverInfo.load5.toFixed(2)}
+                </div>
+              </div>
               <div className="uptime">
                 <Icon name="clock" size={12} /> 已运行 {serverInfo.uptime}
               </div>

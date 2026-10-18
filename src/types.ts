@@ -108,8 +108,17 @@ export type DiagState =
 export interface ServerInfo {
   memTotal: number;
   memUsed: number;
+  /** free -b available column (RAM available for new processes). */
+  memAvailable: number;
+  swapTotal: number;
+  swapUsed: number;
   diskTotal: number;
   diskUsed: number;
+  /** Computed rates between polls (bytes/s), 0 on first sample. */
+  diskReadRate: number;
+  diskWriteRate: number;
+  netRxRate: number;
+  netTxRate: number;
   load1: number;
   load5: number;
   cores: number;

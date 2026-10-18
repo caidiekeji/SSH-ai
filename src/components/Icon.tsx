@@ -45,6 +45,18 @@ const P: Record<string, ReactNode> = {
       <path d="M7 17 17 7" />
     </>
   ),
+  arrowDown: (
+    <>
+      <path d="M12 5v14" />
+      <path d="m19 12-7 7-7-7" />
+    </>
+  ),
+  arrowUp: (
+    <>
+      <path d="M12 19V5" />
+      <path d="m5 12 7-7 7 7" />
+    </>
+  ),
   terminal: (
     <>
       <polyline points="4 17 10 11 4 5" />
