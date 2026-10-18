@@ -25,6 +25,14 @@ pub struct ConnectionConfig {
     pub key_path: Option<String>,
 }
 
+/// Global app settings (non-sensitive). `system_prompt` is an optional
+/// user-written style directive prepended to the built-in diagnosis prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppSettings {
+    #[serde(default)]
+    pub system_prompt: String,
+}
+
 pub struct AppState {
     pub app: tauri::AppHandle,
     pub data_dir: PathBuf,
@@ -38,6 +46,7 @@ pub struct AppState {
     /// Pending TOFU decision: the russh handler parks here while the UI asks
     /// the user to trust an unknown host key. Resolved by host_key_respond.
     pub pending_hostkey: tokio::sync::Mutex<Option<PendingHostKey>>,
+    pub settings: Mutex<AppSettings>,
 }
 
 pub struct PendingHostKey {
@@ -52,6 +61,7 @@ impl AppState {
         let whitelist_file = data_dir.join("command_whitelist.json");
         let profiles = load_json_or(&data_dir.join("profiles.json"), Vec::new());
         let connections = load_json_or(&data_dir.join("connections.json"), Vec::new());
+        let settings = load_json_or(&data_dir.join("settings.json"), AppSettings::default());
 
         // Load user whitelist into the risk engine.
         let risk = RiskEngine::default();
@@ -69,6 +79,7 @@ impl AppState {
             whitelist_file,
             risk,
             pending_hostkey: tokio::sync::Mutex::new(None),
+            settings: Mutex::new(settings),
         }
     }
 
@@ -89,6 +100,17 @@ impl AppState {
     pub fn save_whitelist(&self) -> Result<(), String> {
         let wl = self.risk.whitelist.lock().unwrap_or_else(|e| e.into_inner());
         save_json(&self.whitelist_file, &*wl)
+    }
+
+    pub fn save_settings(&self) -> Result<(), String> {
+        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        save_json(&self.data_dir.join("settings.json"), &*settings)
+    }
+
+    /// Trimmed custom system prompt; empty string means "use default only".
+    pub fn system_prompt(&self) -> String {
+        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.system_prompt.trim().to_string()
     }
 
     pub fn emit(&self, event: &str, payload: impl serde::Serialize + Clone) {

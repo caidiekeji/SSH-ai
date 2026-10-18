@@ -209,8 +209,52 @@ function AiSettings({ onClose }: { onClose: () => void }) {
     model: !!model,
   };
 
+  // ---- global system prompt (optional, applies to all providers) ----
+  const [sysPrompt, setSysPrompt] = useState("");
+  const [sysSaved, setSysSaved] = useState(false);
+  const [sysBusy, setSysBusy] = useState(false);
+  useEffect(() => {
+    ipc.getSystemPrompt().then(setSysPrompt).catch(() => {});
+  }, []);
+  const saveSysPrompt = async () => {
+    setSysBusy(true);
+    setSysSaved(false);
+    try {
+      await ipc.setSystemPrompt(sysPrompt);
+      setSysSaved(true);
+      setTimeout(() => setSysSaved(false), 2500);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSysBusy(false);
+    }
+  };
+
   return (
     <>
+      {/* global system prompt */}
+      <section className="set-section">
+        <h3 className="set-title">系统提示词（可选）</h3>
+        <div className="dim-note" style={{ marginBottom: 8 }}>
+          自定义 AI 的回答风格，例如「把我的大白话转成专业命令并解释」。它会叠加在内置诊断规则之前，内置的输出格式与安全规则始终生效。留空使用默认。
+        </div>
+        <textarea
+          className="sys-prompt-input"
+          rows={4}
+          maxLength={2000}
+          value={sysPrompt}
+          onChange={(e) => setSysPrompt(e.target.value)}
+          placeholder="例：我是运维新手，请把我的大白话描述转成专业的排查命令，并逐步解释每条命令的作用。"
+          spellCheck={false}
+        />
+        <div className="sys-prompt-foot">
+          <span className="dim-note">{sysPrompt.length}/2000{sysSaved ? " · 已保存" : ""}</span>
+          <button className="primary small" disabled={sysBusy} onClick={saveSysPrompt}>
+            {sysBusy ? "保存中…" : "保存提示词"}
+          </button>
+        </div>
+      </section>
+
       {/* saved profiles */}
       <section className="set-section">
         <h3 className="set-title">已保存 Profile</h3>

@@ -101,6 +101,8 @@ pub fn run() {
             commands::remove_whitelist,
             // Diagnosis
             commands::ai_diagnose,
+            commands::get_system_prompt,
+            commands::set_system_prompt,
             commands::parse_preview,
             // Server dashboard (user-initiated exec, never AI-driven)
             commands::exec_oneshot,

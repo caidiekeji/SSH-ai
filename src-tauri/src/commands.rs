@@ -512,6 +512,10 @@ pub async fn ai_diagnose(
                 pipeline: &p,
                 blocks: &target_blocks,
                 user_question: &question,
+                custom_prompt: {
+                    let sp = state.system_prompt();
+                    if sp.is_empty() { None } else { Some(sp) }
+                },
             };
             let app_for_chunks = app.clone();
             run_diagnosis(adapter.as_ref(), &req, &mut move |chunk| {
@@ -540,6 +544,26 @@ pub async fn ai_diagnose(
 #[tauri::command]
 pub fn parse_preview(raw: String) -> serde_json::Value {
     serde_json::to_value(parse_response(&raw, false)).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// AI system prompt (global, optional). Custom text is PREPENDED to the
+// built-in diagnosis prompt; the built-in schema + safety rules always apply.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn get_system_prompt(state: State<'_, AppState>) -> String {
+    state.system_prompt()
+}
+
+#[tauri::command]
+pub fn set_system_prompt(state: State<'_, AppState>, prompt: String) -> Result<(), String> {
+    let trimmed = prompt.trim().to_string();
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.system_prompt = trimmed;
+    }
+    state.save_settings()
 }
 
 /// Save an uploaded private key into the app-private keys directory and

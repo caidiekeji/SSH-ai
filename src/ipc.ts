@@ -79,6 +79,10 @@ export const ipc = {
       question,
     }),
 
+  // ---- AI system prompt (global, optional) ----
+  getSystemPrompt: () => invoke<string>("get_system_prompt"),
+  setSystemPrompt: (prompt: string) => invoke<void>("set_system_prompt", { prompt }),
+
   // ---- Server dashboard (user-initiated exec on a separate channel) ----
   execOneshot: (sessionId: number, command: string) =>
     invoke<string>("exec_oneshot", { sessionId, command }),

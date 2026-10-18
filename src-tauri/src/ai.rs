@@ -77,6 +77,24 @@ pub struct DiagnosisRequest<'a> {
     pub pipeline: &'a Pipeline,
     pub blocks: &'a [ErrorBlock],
     pub user_question: &'a str,
+    /// Optional user-written style directive (from Settings). It is PREPENDED
+    /// to the built-in prompt so the JSON schema + safety rules below can
+    /// never be overridden. Hard-capped to keep prompts small.
+    pub custom_prompt: Option<String>,
+}
+
+const CUSTOM_PROMPT_MAX_CHARS: usize = 2000;
+
+/// Compose the final system message: optional custom directive + built-in
+/// rules. The built-in part is always present verbatim.
+pub fn compose_system_prompt(custom: Option<&str>) -> String {
+    match custom {
+        Some(p) if !p.trim().is_empty() => {
+            let trimmed: String = p.trim().chars().take(CUSTOM_PROMPT_MAX_CHARS).collect();
+            format!("{trimmed}\n\n以下是必须严格遵守的输出格式与安全规则：\n{SYSTEM_PROMPT}")
+        }
+        _ => SYSTEM_PROMPT.to_string(),
+    }
 }
 
 /// Build the LLM message list from pipeline state (HC-05: no raw bytes ever).
@@ -104,7 +122,7 @@ pub fn build_messages(req: &DiagnosisRequest<'_>) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
             role: "system".into(),
-            content: SYSTEM_PROMPT.into(),
+            content: compose_system_prompt(req.custom_prompt.as_deref()),
         },
         ChatMessage {
             role: "user".into(),
@@ -327,5 +345,20 @@ mod tests {
         );
         let r = parse_response(&raw, false);
         assert_eq!(r.steps.as_ref().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn custom_prompt_is_prepended_but_rules_kept() {
+        let with = compose_system_prompt(Some("把大白话转成专业命令"));
+        assert!(with.starts_with("把大白话转成专业命令"));
+        // Built-in rules must always survive a hostile custom prompt.
+        assert!(with.contains("只返回一个 JSON 对象"));
+        assert!(with.contains("不可信数据"));
+        assert_eq!(compose_system_prompt(None), SYSTEM_PROMPT);
+        assert_eq!(compose_system_prompt(Some("   ")), SYSTEM_PROMPT);
+        // Over-long custom prompts are hard-capped.
+        let long = "x".repeat(5000);
+        let capped = compose_system_prompt(Some(&long));
+        assert!(capped.len() < SYSTEM_PROMPT.len() + 6000);
     }
 }

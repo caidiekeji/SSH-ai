@@ -146,7 +146,8 @@ export const useStore = create<Store>((set, get) => ({
     };
     set((s) => ({
       diagState: "T1_ANALYZING",
-      cards: [card, ...s.cards],
+      // Chat flows top-down: newest message appends at the bottom.
+      cards: [...s.cards, card],
       streamingCardId: card.id,
       diagError: "",
     }));

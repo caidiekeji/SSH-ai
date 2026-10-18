@@ -1208,3 +1208,20 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   border-radius: 10px;
 }
 .spin { animation: spin 1.2s linear infinite; }
+
+/* ---- system prompt (settings > AI) ---- */
+.sys-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.6;
+  min-height: 88px;
+}
+.sys-prompt-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
