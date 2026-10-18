@@ -1129,12 +1129,13 @@ function McpSettings() {
 
 /* ================= 外观 ================= */
 
+// 预览色与 styles.css 主题 v2 token 保持一致（GitHub/Nord/Everforest/Rosé Pine）
 const THEME_CARDS: { id: ThemeName; name: string; sw: [string, string, string] }[] = [
-  { id: "dark", name: "深色", sw: ["#0f1216", "#1c2128", "#4c8dff"] },
+  { id: "dark", name: "深色", sw: ["#0d1117", "#21262d", "#58a6ff"] },
   { id: "light", name: "日间", sw: ["#ffffff", "#f6f8fa", "#0969da"] },
-  { id: "ocean", name: "海洋", sw: ["#0b1220", "#152238", "#38bdf8"] },
-  { id: "forest", name: "森林", sw: ["#0c1310", "#17251c", "#34d399"] },
-  { id: "sakura", name: "樱花", sw: ["#171015", "#271c23", "#f472b6"] },
+  { id: "ocean", name: "海洋", sw: ["#2e3440", "#434c5e", "#88c0d0"] },
+  { id: "forest", name: "森林", sw: ["#2f383e", "#414b50", "#a7c080"] },
+  { id: "sakura", name: "樱花", sw: ["#faf4ed", "#f4ede8", "#b4637a"] },
 ];
 
 function Appearance() {

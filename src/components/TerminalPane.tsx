@@ -16,6 +16,7 @@ const termRegistry = new Map<number, Terminal>();
 // xterm theme must match the CSS design tokens per color mode.
 export function xtermThemeFor(theme: ThemeName) {
   switch (theme) {
+    // 主题 v2：与 styles.css 的 token 保持一致（GitHub/Nord/Everforest/Rosé Pine）。
     case "light":
       return {
         background: "#ffffff",
@@ -26,34 +27,34 @@ export function xtermThemeFor(theme: ThemeName) {
       };
     case "ocean":
       return {
-        background: "#0b1220",
-        foreground: "#e2e8f0",
-        cursor: "#38bdf8",
-        cursorAccent: "#0b1220",
-        selectionBackground: "#1e3a5f",
+        background: "#272c36",
+        foreground: "#eceff4",
+        cursor: "#88c0d0",
+        cursorAccent: "#272c36",
+        selectionBackground: "#41506b",
       };
     case "forest":
       return {
-        background: "#0c1310",
-        foreground: "#e3ece5",
-        cursor: "#34d399",
-        cursorAccent: "#0c1310",
-        selectionBackground: "#1d4034",
+        background: "#2b3339",
+        foreground: "#d3c6aa",
+        cursor: "#a7c080",
+        cursorAccent: "#2b3339",
+        selectionBackground: "#45534c",
       };
     case "sakura":
       return {
-        background: "#171015",
-        foreground: "#f2e6ec",
-        cursor: "#f472b6",
-        cursorAccent: "#171015",
-        selectionBackground: "#4a2738",
+        background: "#f2e9e1",
+        foreground: "#575279",
+        cursor: "#b4637a",
+        cursorAccent: "#f2e9e1",
+        selectionBackground: "#e8d3d3",
       };
     default:
       return {
-        background: "#0f1216",
+        background: "#010409",
         foreground: "#e6edf3",
-        cursor: "#4c8dff",
-        cursorAccent: "#0f1216",
+        cursor: "#58a6ff",
+        cursorAccent: "#010409",
         selectionBackground: "#264f78",
       };
   }

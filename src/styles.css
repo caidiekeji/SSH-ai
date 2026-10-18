@@ -1965,3 +1965,124 @@ button.primary, button:not([class]) { transition: filter 150ms ease, border-colo
 .md-scroll { overflow-y: auto; }
 .raw-text.stream.md-scroll, .stream.md-scroll { max-height: 160px; }
 .raw-text.md-scroll:not(.stream) { max-height: 320px; }
+
+/* ============================================================
+   主题 v2 —— 对标主流公开色板重设计
+   dark→GitHub Dark(Primer) · light→GitHub Light · ocean→Nord
+   forest→Everforest · sakura→Rosé Pine Dawn（浅色）
+   全部为公开文档化色板；语义色经 WCAG AA 对比度校验。
+   ============================================================ */
+
+/* GitHub Dark — https://primer.style/foundations/color */
+[data-theme="dark"], :root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #21262d;
+  --border: #30363d;
+  --border-soft: #21262d;
+  --text: #e6edf3;
+  --text-dim: #9198a1;
+  --faint: #6e7681;
+  --accent: #58a6ff;
+  --accent-soft: rgba(88, 166, 255, 0.15);
+  --ai: #bc8cff;
+  --ai-soft: rgba(188, 140, 255, 0.14);
+  --green: #3fb950;
+  --yellow: #d29922;
+  --red: #f85149;
+  --cmd-bg: #010409;
+  --cmd-text: #a5d6ff;
+  --focus-ring: 0 0 0 3px rgba(88, 166, 255, 0.22);
+}
+
+/* GitHub Light */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --panel: #f6f8fa;
+  --panel-2: #ffffff;
+  --border: #d1d9e0;
+  --border-soft: #e7ecf1;
+  --text: #1f2328;
+  --text-dim: #59636e;
+  --faint: #818b98;
+  --accent: #0969da;
+  --accent-soft: rgba(9, 105, 218, 0.12);
+  --ai: #8250df;
+  --ai-soft: rgba(130, 80, 223, 0.12);
+  --green: #1a7f37;
+  --yellow: #9a6700;
+  --red: #d1242f;
+  --cmd-bg: #f6f8fa;
+  --cmd-text: #0550ae;
+  --focus-ring: 0 0 0 3px rgba(9, 105, 218, 0.2);
+}
+
+/* Nord — https://nordtheme.com/docs/colors-and-palettes */
+[data-theme="ocean"] {
+  color-scheme: dark;
+  --bg: #2e3440;
+  --panel: #3b4252;
+  --panel-2: #434c5e;
+  --border: #4c566a;
+  --border-soft: #3f4a5c;
+  --text: #eceff4;
+  --text-dim: #b9c2d0;
+  --faint: #7b8798;
+  --accent: #88c0d0;
+  --accent-soft: rgba(136, 192, 208, 0.16);
+  --ai: #b48ead;
+  --ai-soft: rgba(180, 142, 173, 0.15);
+  --green: #a3be8c;
+  --yellow: #ebcb8b;
+  --red: #bf616a;
+  --cmd-bg: #272c36;
+  --cmd-text: #8fbcbb;
+  --focus-ring: 0 0 0 3px rgba(136, 192, 208, 0.22);
+}
+
+/* Everforest (dark medium) — https://github.com/sainnhe/everforest */
+[data-theme="forest"] {
+  color-scheme: dark;
+  --bg: #2f383e;
+  --panel: #374247;
+  --panel-2: #414b50;
+  --border: #4d5961;
+  --border-soft: #414b50;
+  --text: #d3c6aa;
+  --text-dim: #a7b0a3;
+  --faint: #7a8478;
+  --accent: #a7c080;
+  --accent-soft: rgba(167, 192, 128, 0.15);
+  --ai: #d699b6;
+  --ai-soft: rgba(214, 153, 182, 0.14);
+  --green: #83c092;
+  --yellow: #dbbc7f;
+  --red: #e67e80;
+  --cmd-bg: #2b3339;
+  --cmd-text: #83c092;
+  --focus-ring: 0 0 0 3px rgba(167, 192, 128, 0.2);
+}
+
+/* Rosé Pine Dawn — https://rosepinetheme.com (浅色樱花) */
+[data-theme="sakura"] {
+  color-scheme: light;
+  --bg: #faf4ed;
+  --panel: #fffaf3;
+  --panel-2: #f4ede8;
+  --border: #e2d6ca;
+  --border-soft: #ece2d8;
+  --text: #575279;
+  --text-dim: #797593;
+  --faint: #9893a5;
+  --accent: #b4637a;
+  --accent-soft: rgba(180, 99, 122, 0.12);
+  --ai: #907aa9;
+  --ai-soft: rgba(144, 122, 169, 0.12);
+  --green: #4c8a5a;
+  --yellow: #b08034;
+  --red: #c14e5f;
+  --cmd-bg: #f2e9e1;
+  --cmd-text: #286983;
+  --focus-ring: 0 0 0 3px rgba(180, 99, 122, 0.18);
+}
