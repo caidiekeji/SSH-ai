@@ -668,7 +668,7 @@ pub fn set_mcp_config(state: State<'_, AppState>, enabled: bool, port: u16) -> R
     {
         let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         s.mcp_enabled = enabled;
-        if (1024..65536).contains(&port) {
+        if (1024..=65535).contains(&port) {
             s.mcp_port = port;
         }
     }

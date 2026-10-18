@@ -10,7 +10,7 @@
 
 use crate::state::AppState;
 use serde_json::{json, Value};
-use tauri::{Manager, State};
+use tauri::Manager;
 use tiny_http::{Header, Method, Response};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
