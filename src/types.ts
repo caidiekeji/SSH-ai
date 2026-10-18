@@ -100,3 +100,25 @@ export type DiagState =
   | "T3_CONFIRM_RED"
   | "T4_PREFILLED"
   | "T5_EXECUTING";
+
+// ---- Server dashboard / file manager ----
+
+export interface ServerInfo {
+  memTotal: number;
+  memUsed: number;
+  diskTotal: number;
+  diskUsed: number;
+  load1: number;
+  load5: number;
+  cores: number;
+  uptime: string;
+}
+
+export interface FileEntry {
+  name: string;
+  dir: boolean;
+  size: number;
+  mtime: string;
+}
+
+export type ThemeName = "dark" | "light" | "ocean" | "forest" | "sakura";

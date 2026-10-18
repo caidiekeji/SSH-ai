@@ -78,4 +78,8 @@ export const ipc = {
       sessionId,
       question,
     }),
+
+  // ---- Server dashboard (user-initiated exec on a separate channel) ----
+  execOneshot: (sessionId: number, command: string) =>
+    invoke<string>("exec_oneshot", { sessionId, command }),
 };
