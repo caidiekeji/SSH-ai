@@ -130,6 +130,9 @@ pub fn run() {
             commands::parse_preview,
             // Server dashboard (user-initiated exec, never AI-driven)
             commands::exec_oneshot,
+            // SFTP (user-initiated file transfer)
+            commands::sftp_download,
+            commands::sftp_upload_data,
             // Private key upload (file stored in app-private dir)
             commands::save_uploaded_key,
         ])

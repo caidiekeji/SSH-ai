@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "../store";
@@ -73,6 +74,10 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
   const addErrorBlock = useStore((s) => s.addErrorBlock);
   const setTabStatus = useStore((s) => s.setTabStatus);
   const theme = useStore((s) => s.theme);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchText, setSearchText] = useState("");
+  const searchRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Terminal lifecycle: create once per session id.
   useEffect(() => {
@@ -87,8 +92,41 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
+    const search = new SearchAddon();
+    term.loadAddon(search);
+    searchRef.current = search;
     term.open(hostRef.current);
     termRegistry.set(sessionId, term);
+    // Ctrl+F opens the in-terminal search bar (custom handler returns false
+    // so the keystroke is consumed by us instead of being typed).
+    term.attachCustomKeyEventHandler((e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && e.type === "keydown") {
+        setShowSearch(true);
+        setTimeout(() => searchInputRef.current?.select(), 30);
+        return false;
+      }
+      if (e.key === "Escape" && e.type === "keydown") {
+        setShowSearch(false);
+      }
+      return true;
+    });
+    // Ctrl+滚轮：字体缩放（8~32px），缩放后重新 fit。
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const cur = term.options.fontSize ?? 13;
+      const next = Math.min(32, Math.max(8, cur + (e.deltaY < 0 ? 1 : -1)));
+      if (next !== cur) {
+        term.options.fontSize = next;
+        try {
+          fitRef.current?.fit();
+          ipc.terminalResize(sessionId, term.cols, term.rows);
+        } catch {
+          /* pane hidden */
+        }
+      }
+    };
+    hostRef.current.addEventListener("wheel", onWheel, { passive: false });
     if (activeRef.current) {
       try {
         fit.fit();
@@ -148,6 +186,8 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
       dataSub.dispose();
       term.dispose();
       termRegistry.delete(sessionId);
+      searchRef.current = null;
+      hostRef.current?.removeEventListener("wheel", onWheel);
       termRef.current = null;
       fitRef.current = null;
     };
@@ -174,6 +214,56 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
   return (
     <div className="term-host-inner" style={{ display: active ? "flex" : "none" }}>
       <div ref={hostRef} className="term-host" />
+      {showSearch && (
+        <div className="term-search">
+          <input
+            ref={searchInputRef}
+            value={searchText}
+            onChange={(e) => {
+              setSearchText(e.target.value);
+              if (e.target.value) searchRef.current?.findNext(e.target.value, { caseSensitive: false });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                if (searchText) {
+                  e.shiftKey
+                    ? searchRef.current?.findPrevious(searchText, { caseSensitive: false })
+                    : searchRef.current?.findNext(searchText, { caseSensitive: false });
+                }
+              } else if (e.key === "Escape") {
+                setShowSearch(false);
+                searchRef.current?.clearDecorations();
+              }
+            }}
+            placeholder="在终端中查找"
+            spellCheck={false}
+          />
+          <button
+            className="icon-op"
+            title="上一个 (Shift+Enter)"
+            onClick={() => searchText && searchRef.current?.findPrevious(searchText, { caseSensitive: false })}
+          >
+            <Icon name="chevronUp" size={13} />
+          </button>
+          <button
+            className="icon-op"
+            title="下一个 (Enter)"
+            onClick={() => searchText && searchRef.current?.findNext(searchText, { caseSensitive: false })}
+          >
+            <Icon name="chevronDown" size={13} />
+          </button>
+          <button
+            className="icon-op"
+            title="关闭 (Esc)"
+            onClick={() => {
+              setShowSearch(false);
+              searchRef.current?.clearDecorations();
+            }}
+          >
+            <Icon name="x" size={13} />
+          </button>
+        </div>
+      )}
       {status !== "connected" && (
         <div className="terminal-empty terminal-empty-overlay">
           <div>

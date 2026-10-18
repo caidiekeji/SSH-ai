@@ -132,6 +132,12 @@ export const ipc = {
   execOneshot: (sessionId: number, command: string, timeoutSecs?: number) =>
     invoke<string>("exec_oneshot", { sessionId, command, timeoutSecs }),
 
+  // ---- SFTP (user-initiated file transfer) ----
+  sftpDownload: (sessionId: number, remotePath: string) =>
+    invoke<string>("sftp_download", { sessionId, remotePath }),
+  sftpUploadData: (sessionId: number, remotePath: string, dataB64: string) =>
+    invoke<string>("sftp_upload_data", { sessionId, remotePath, dataB64 }),
+
   // ---- Private key upload ----
   saveUploadedKey: (name: string, content: string) =>
     invoke<string>("save_uploaded_key", { name, content }),

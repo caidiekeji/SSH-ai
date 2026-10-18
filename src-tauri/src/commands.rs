@@ -681,6 +681,109 @@ pub fn delete_prompt(state: State<'_, AppState>, id: String) -> Result<(), Strin
     state.save_settings()
 }
 
+// ---------------------------------------------------------------------------
+// SFTP: upload (bytes from the webview) / download (to app-data/downloads).
+// USER-initiated file transfer only — the AI path never touches these.
+// ---------------------------------------------------------------------------
+
+async fn open_sftp(state: &State<'_, AppState>, session_id: u64) -> Result<russh_sftp::client::SftpSession, String> {
+    let handle_cell = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .map(|s| s.handle.clone())
+            .ok_or("会话不存在")?
+    };
+    let ch = {
+        let mut guard = handle_cell.lock().await;
+        let handle = guard.as_mut().ok_or("会话已断开")?;
+        let mut ch = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("打开通道失败: {e}"))?;
+        ch.request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| format!("请求 SFTP 子系统失败: {e}"))?;
+        ch
+    };
+    russh_sftp::client::SftpSession::new(ch.into_stream())
+        .await
+        .map_err(|e| format!("SFTP 初始化失败: {e}"))
+}
+
+#[tauri::command]
+pub async fn sftp_download(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    session_id: u64,
+    remote_path: String,
+) -> Result<String, String> {
+    use tauri::Manager;
+    let sftp = open_sftp(&state, session_id).await?;
+    let meta = sftp
+        .metadata(&remote_path)
+        .await
+        .map_err(|e| format!("读取远端文件信息失败: {e}"))?;
+    if meta.is_dir() {
+        return Err("目标是一个目录，仅支持下载文件".into());
+    }
+    let name = remote_path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("file").to_string();
+    let local_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("downloads");
+    tokio::fs::create_dir_all(&local_dir).await.map_err(|e| e.to_string())?;
+    let local_path = local_dir.join(&name);
+    let mut out = tokio::fs::File::create(&local_path)
+        .await
+        .map_err(|e| format!("创建本地文件失败: {e}"))?;
+    use tokio::io::AsyncWriteExt;
+    let mut offset: u64 = 0;
+    loop {
+        let data = sftp
+            .read(&remote_path, offset, 32768)
+            .await
+            .map_err(|e| format!("读取失败: {e}"))?;
+        let n = data.len();
+        if n == 0 {
+            break;
+        }
+        out.write_all(&data).await.map_err(|e| e.to_string())?;
+        offset += n as u64;
+        if n < 32768 {
+            break;
+        }
+    }
+    out.flush().await.map_err(|e| e.to_string())?;
+    Ok(format!("已下载 {name}（{offset} 字节）→ {}", local_path.display()))
+}
+
+#[tauri::command]
+pub async fn sftp_upload_data(
+    state: State<'_, AppState>,
+    session_id: u64,
+    remote_path: String,
+    data_b64: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    if data_b64.len() > 80_000_000 {
+        return Err("文件过大（上限约 60MB），请用命令行传输".into());
+    }
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("数据解码失败: {e}"))?;
+    let sftp = open_sftp(&state, session_id).await?;
+    let mut offset: u64 = 0;
+    for chunk in data.chunks(32768) {
+        sftp.write(&remote_path, offset, chunk)
+            .await
+            .map_err(|e| format!("写入失败: {e}"))?;
+        offset += chunk.len() as u64;
+    }
+    Ok(format!("已上传 {offset} 字节 → {remote_path}"))
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {

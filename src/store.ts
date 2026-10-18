@@ -25,6 +25,16 @@ export interface TermTab {
   title: string;
   host: string;
   status: ConnStatus;
+  /** Saved-connection args enabling auto-reconnect (connection_id required). */
+  connectArgs?: {
+    host: string;
+    port: number;
+    username: string;
+    auth: { kind: "password"; password: string } | { kind: "publickey"; key_path: string; passphrase: string | null };
+    use_saved_password?: boolean;
+    connection_id?: string;
+  };
+  reconnects?: number;
 }
 
 interface PendingPrefill {
@@ -46,10 +56,12 @@ interface Store {
   // ---- multi-host tabs ----
   tabs: TermTab[];
   activeTabId: number | null;
-  openTab: (sessionId: number, title: string, host: string) => void;
+  openTab: (sessionId: number, title: string, host: string, connectArgs?: TermTab["connectArgs"]) => void;
   switchTab: (sessionId: number) => void;
   closeTab: (sessionId: number) => Promise<void>;
   setTabStatus: (sessionId: number, status: ConnStatus) => void;
+  /** Auto-reconnect a closed tab (saved-password connections, ≤3 attempts). */
+  maybeReconnect: (oldSessionId: number) => Promise<void>;
 
   // ---- AI config (§2.2) ----
   aiState: AiConfigState;
@@ -165,12 +177,12 @@ export const useStore = create<Store>((set, get) => ({
   // ---- multi-host tabs ----
   tabs: [],
   activeTabId: null,
-  openTab: (sessionId, title, host) =>
+  openTab: (sessionId, title, host, connectArgs) =>
     set((s) => ({
       // If this session already has a tab, just focus it (reconnect case).
       tabs: s.tabs.some((t) => t.sessionId === sessionId)
         ? s.tabs.map((t) => (t.sessionId === sessionId ? { ...t, status: "connected" as ConnStatus } : t))
-        : [...s.tabs, { sessionId, title, host, status: "connected" as ConnStatus }],
+        : [...s.tabs, { sessionId, title, host, status: "connected" as ConnStatus, connectArgs }],
       activeTabId: sessionId,
       sessionId,
       connStatus: "connected" as ConnStatus,
@@ -222,7 +234,7 @@ export const useStore = create<Store>((set, get) => ({
     }
     set({ tabs: rest });
   },
-  setTabStatus: (sessionId, status) =>
+  setTabStatus: (sessionId, status) => {
     set((s) => {
       const tabs = s.tabs.map((t) => (t.sessionId === sessionId ? { ...t, status } : t));
       const isActive = s.activeTabId === sessionId;
@@ -230,7 +242,42 @@ export const useStore = create<Store>((set, get) => ({
         tabs,
         ...(isActive ? { connStatus: status } : {}),
       };
-    }),
+    });
+    if (status === "closed") void get().maybeReconnect(sessionId);
+  },
+
+  // Auto-reconnect with exponential-ish backoff: only saved-password
+  // connections (connection_id + use_saved_password) can be re-established
+  // without user interaction. Max 3 attempts, 2s/4s/6s.
+  maybeReconnect: async (oldSessionId) => {
+    const tab = get().tabs.find((t) => t.sessionId === oldSessionId);
+    if (!tab?.connectArgs?.connection_id) return;
+    const n = tab.reconnects ?? 0;
+    if (n >= 3) return;
+    await new Promise((r) => setTimeout(r, 2000 * (n + 1)));
+    // The user may have reconnected manually while waiting.
+    const cur = get().tabs.find((t) => t.sessionId === oldSessionId);
+    if (!cur || cur.status !== "closed") return;
+    try {
+      const res = await ipc.sshConnect(tab.connectArgs);
+      ipc.sshDisconnect(oldSessionId).catch(() => {});
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.sessionId === oldSessionId
+            ? { ...t, sessionId: res.sessionId, status: "connected" as ConnStatus, reconnects: n + 1 }
+            : t,
+        ),
+        activeTabId: s.activeTabId === oldSessionId ? res.sessionId : s.activeTabId,
+        sessionId: s.sessionId === oldSessionId ? res.sessionId : s.sessionId,
+        ...(s.activeTabId === oldSessionId ? { activeHost: tab.host, connStatus: "connected" as ConnStatus } : {}),
+      }));
+    } catch {
+      set((s) => ({
+        tabs: s.tabs.map((t) => (t.sessionId === oldSessionId ? { ...t, reconnects: n + 1 } : t)),
+      }));
+      void get().maybeReconnect(oldSessionId);
+    }
+  },
 
   // ---- AI config ----
   aiState: "S0_UNCONFIGURED",

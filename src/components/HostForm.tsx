@@ -18,6 +18,8 @@ export interface HostFormValues {
   password: string;
   keyPath: string;
   keyFileName: string;
+  /** Optional group label for the saved-session list. */
+  group: string;
 }
 
 export const emptyHostForm = (): HostFormValues => ({
@@ -29,6 +31,7 @@ export const emptyHostForm = (): HostFormValues => ({
   password: "",
   keyPath: "",
   keyFileName: "",
+  group: "",
 });
 
 /** Build a ConnectionConfig for saveConnection. Pass an existing id to edit. */
@@ -41,6 +44,7 @@ export function connFromForm(form: HostFormValues, id: string): ConnectionConfig
     username: form.username,
     auth_method: form.authMethod,
     key_path: form.authMethod === "publickey" ? form.keyPath || null : null,
+    group: form.group.trim(),
   };
 }
 
@@ -56,6 +60,7 @@ export function formFromConn(c: ConnectionConfig): HostFormValues {
     password: "",
     keyPath: c.key_path || "",
     keyFileName: "",
+    group: c.group || "",
   };
 }
 
@@ -107,6 +112,8 @@ export function HostFormFields({
       <input value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) || 22 })} />
       <label>用户名</label>
       <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} spellCheck={false} />
+      <label>分组</label>
+      <input value={form.group} onChange={(e) => setForm({ ...form, group: e.target.value })} placeholder="可选，如：生产环境" spellCheck={false} />
       <label>认证方式</label>
       <select
         value={form.authMethod}

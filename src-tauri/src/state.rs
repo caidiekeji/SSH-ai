@@ -23,6 +23,9 @@ pub struct ConnectionConfig {
     pub auth_method: String,
     #[serde(default)]
     pub key_path: Option<String>,
+    /// Optional group label for the session list (e.g. "生产环境").
+    #[serde(default)]
+    pub group: String,
 }
 
 /// One named prompt in the prompt library. A prompt can target the

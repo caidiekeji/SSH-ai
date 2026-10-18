@@ -36,6 +36,7 @@ export function ServerPanel() {
   const [editText, setEditText] = useState("");
   const [editBusy, setEditBusy] = useState(false);
   const [editErr, setEditErr] = useState("");
+  const [fmMsg, setFmMsg] = useState("");
   const [form, setForm] = useState<HostFormValues>(emptyHostForm);
   const [err, setErr] = useState("");
   const { keyBusy, onKeyFile } = useKeyUpload(setForm, setErr);
@@ -81,7 +82,24 @@ export function ServerPanel() {
         use_saved_password: has,
         connection_id: conn.id,
       });
-      st.openTab(res.sessionId, conn.name, `${conn.host}:${conn.port}`);
+      st.openTab(
+        res.sessionId,
+        conn.name,
+        `${conn.host}:${conn.port}`,
+        has
+          ? {
+              host: conn.host,
+              port: conn.port,
+              username: conn.username,
+              auth:
+                conn.auth_method === "password"
+                  ? { kind: "password", password: "" }
+                  : { kind: "publickey", key_path: conn.key_path || "", passphrase: null },
+              use_saved_password: true,
+              connection_id: conn.id,
+            }
+          : undefined,
+      );
     } catch (e) {
       st.setConn({ connStatus: "error", connError: String(e) });
     }
@@ -227,6 +245,41 @@ export function ServerPanel() {
     }
   };
 
+  // ---- SFTP upload (webview bytes → base64 → remote write) ----
+  const uploadFiles = async (list: FileList | null) => {
+    if (!list || !sessionId) return;
+    for (const f of Array.from(list)) {
+      if (f.size > 60 * 1024 * 1024) {
+        setFmMsg(`跳过 ${f.name}：超过 60MB 上限`);
+        continue;
+      }
+      try {
+        const buf = new Uint8Array(await f.arrayBuffer());
+        let bin = "";
+        const CH = 0x8000; // avoid call-stack overflow on spread
+        for (let i = 0; i < buf.length; i += CH) {
+          bin += String.fromCharCode(...buf.subarray(i, i + CH));
+        }
+        const remote = `${files.path.replace(/\/+$/, "")}/${f.name}`;
+        setFmMsg(await ipc.sftpUploadData(sessionId, remote, btoa(bin)));
+      } catch (err) {
+        setFmMsg(`上传 ${f.name} 失败：${String(err)}`);
+      }
+    }
+    listDir(files.path);
+  };
+
+  const doDownload = async (e: FileEntry) => {
+    if (!sessionId) return;
+    try {
+      setFmMsg(
+        await ipc.sftpDownload(sessionId, `${files.path.replace(/\/+$/, "")}/${e.name}`),
+      );
+    } catch (err) {
+      setFmMsg(`下载失败：${String(err)}`);
+    }
+  };
+
   const execEntry = (e: FileEntry) =>
     setOp({
       title: "执行确认",
@@ -334,11 +387,36 @@ export function ServerPanel() {
                 spellCheck={false}
               />
               <button className="small" title="上级目录" onClick={upDir}><Icon name="chevronUp" size={12} /></button>
-              <button className="small" title="刷新" onClick={() => listDir(files.path)}><Icon name="refresh" size={12} /></button>
-              <button className="small" title="新建文件夹" onClick={mkdir}><Icon name="plus" size={12} /></button>
-            </div>
+            <button className="small" title="刷新" onClick={() => listDir(files.path)}><Icon name="refresh" size={12} /></button>
+            <button className="small" title="新建文件夹" onClick={mkdir}><Icon name="plus" size={12} /></button>
+            <button
+              className="small"
+              title="上传文件到当前目录"
+              onClick={() => document.getElementById("fm-upload-input")?.click()}
+            >
+              <Icon name="upload" size={12} />
+            </button>
+            <input
+              id="fm-upload-input"
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                uploadFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </div>
+          {fmMsg && <div className="ok-text small-err">{fmMsg}</div>}
             {fileError && <div className="error-text small-err">{fileError}</div>}
-            <div className="file-list fm-list">
+            <div
+              className="file-list fm-list"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                uploadFiles(e.dataTransfer.files);
+              }}
+            >
               {files.entries.length === 0 && <div className="dim-note">空目录</div>}
               {files.entries.map((e) => (
                 <div key={e.name} className={`file-row ${e.dir ? "is-dir" : ""}`}>
@@ -363,6 +441,11 @@ export function ServerPanel() {
                     )}
                     {!e.dir && e.size <= 100000 && (
                       <button className="icon-op" title="编辑文本" onClick={() => doEdit(e)}><Icon name="squarePen" size={13} /></button>
+                    )}
+                    {!e.dir && (
+                      <button className="icon-op" title="下载（保存到应用数据目录/downloads）" onClick={() => doDownload(e)}>
+                        <Icon name="download" size={13} />
+                      </button>
                     )}
                     <button className="icon-op" title="重命名" onClick={() => doRename(e)}><Icon name="pencil" size={13} /></button>
                     <button className="icon-op danger" title="删除" onClick={() => doDelete(e)}><Icon name="trash" size={13} /></button>

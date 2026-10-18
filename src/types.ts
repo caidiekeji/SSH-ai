@@ -80,6 +80,7 @@ export interface ConnectionConfig {
   username: string;
   auth_method: "password" | "publickey";
   key_path?: string | null;
+  group?: string;
 }
 
 // ---- State machines (PRD §2.2 / §2.3) ----

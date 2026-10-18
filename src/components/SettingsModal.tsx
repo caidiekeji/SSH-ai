@@ -820,6 +820,7 @@ function SshManager() {
   const [form, setForm] = useState<HostFormValues>(emptyHostForm);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [okMsg, setOkMsg] = useState("");
   const { keyBusy, onKeyFile } = useKeyUpload(setForm, setErr);
 
   useEffect(() => {
@@ -838,6 +839,57 @@ function SshManager() {
     setForm(formFromConn(c));
     setErr("");
     setShowAdd(true);
+  };
+
+  // ---- 会话分组 / 导入导出 ----
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState("");
+  const grouped = useMemo(() => {
+    const map: Record<string, ConnectionConfig[]> = {};
+    for (const c of [...connections].sort((a, b) => a.name.localeCompare(b.name))) {
+      const g = (c.group || "").trim();
+      (map[g] ??= []).push(c);
+    }
+    // 未分组排最后
+    return Object.fromEntries(
+      Object.entries(map).sort(([a], [b]) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b))),
+    );
+  }, [connections]);
+
+  const exportConns = () => {
+    navigator.clipboard
+      .writeText(JSON.stringify(connections, null, 2))
+      .then(() => setErr(""))
+      .catch((e) => setErr(`导出失败：${String(e)}`));
+    setOkMsg("已复制到剪贴板");
+    setTimeout(() => setOkMsg(""), 2000);
+  };
+
+  const importConns = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      const list = JSON.parse(importText) as ConnectionConfig[];
+      if (!Array.isArray(list)) throw new Error("格式不是数组");
+      const existing = new Set(connections.map((c) => c.id));
+      let added = 0;
+      for (const c of list) {
+        if (!c || !c.host || !c.username) continue;
+        const id = existing.has(c.id) ? `conn-${Date.now()}-${added}` : c.id;
+        await ipc.saveConnection({ ...c, id }, null);
+        existing.add(id);
+        added++;
+      }
+      await loadConnections();
+      setShowImport(false);
+      setImportText("");
+      setOkMsg(`已导入 ${added} 台主机（密码需重新输入或连接时保存）`);
+      setTimeout(() => setOkMsg(""), 4000);
+    } catch (e) {
+      setErr(`导入失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const save = async () => {
@@ -870,14 +922,48 @@ function SshManager() {
       <section className="set-section">
         <div className="set-title-row">
           <h3 className="set-title">已保存主机（{connections.length}）</h3>
-          <button className="primary small" onClick={openAdd}>
-            <Icon name="plus" size={12} /> 添加主机
-          </button>
+          <div style={{ display: "flex", gap: 7 }}>
+            <button className="small" title="把所有主机复制为 JSON（用于迁移/备份）" onClick={exportConns}>
+              导出
+            </button>
+            <button className="small" title="粘贴 JSON 恢复主机列表" onClick={() => setShowImport((v) => !v)}>
+              导入
+            </button>
+            <button className="primary small" onClick={openAdd}>
+              <Icon name="plus" size={12} /> 添加主机
+            </button>
+          </div>
         </div>
+
+        {showImport && (
+          <div className="prompt-form">
+            <div className="dim-note" style={{ marginBottom: 8 }}>
+              粘贴此前导出的 JSON（导入会跳过已存在的 ID，不会覆盖现有主机）。
+            </div>
+            <textarea
+              className="sys-prompt-input"
+              rows={6}
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              placeholder='[{"id":"...","name":"web-1","host":"1.2.3.4",...}]'
+              spellCheck={false}
+              style={{ fontFamily: "var(--mono)", fontSize: 11.5 }}
+            />
+            <div className="modal-foot">
+              <button onClick={() => setShowImport(false)}>取消</button>
+              <button className="primary" disabled={busy} onClick={importConns}>
+                {busy ? "导入中…" : "导入"}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="ssh-list">
           {connections.length === 0 && <div className="dim-note">暂无保存的主机。</div>}
-          {connections.map((c) => {
+          {Object.entries(grouped).map(([group, list]) => (
+            <div key={group} className="ssh-group">
+              {group !== "" && <div className="ssh-group-title">{group}（{list.length}）</div>}
+              {list.map((c) => {
             const isActive = connStatus === "connected" && activeHost?.startsWith(`${c.host}:`);
             return (
               <div key={c.id} className={`ssh-card ${isActive ? "active" : ""}`}>
@@ -897,10 +983,13 @@ function SshManager() {
                 </button>
               </div>
             );
-          })}
+              })}
+            </div>
+          ))}
         </div>
       </section>
 
+      {okMsg && <div className="ok-text" style={{ marginTop: 8 }}>{okMsg}</div>}
       {showAdd && (
         <section className="set-section">
           <h3 className="set-title">{editingId ? "编辑主机" : "添加主机"}</h3>
