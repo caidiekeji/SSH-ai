@@ -1,11 +1,12 @@
 // Left panel: hosts + live server stats + file manager.
 // All operations here are EXPLICIT user actions; destructive ops require a
-// typed confirmation dialog. AI output never reaches these exec paths.
+// confirmation dialog. AI output never reaches these exec paths.
 
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import { ipc } from "../ipc";
 import type { ConnectionConfig, FileEntry } from "../types";
+import { Icon } from "./Icon";
 
 const fmtSize = (n: number) => {
   if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
@@ -23,8 +24,6 @@ export function ServerPanel() {
   const serverError = useStore((s) => s.serverError);
   const files = useStore((s) => s.files);
   const fileError = useStore((s) => s.fileError);
-  const theme = useStore((s) => s.theme);
-  const setTheme = useStore((s) => s.setTheme);
   const loadConnections = useStore((s) => s.loadConnections);
   const refreshServer = useStore((s) => s.refreshServer);
   const listDir = useStore((s) => s.listDir);
@@ -209,18 +208,6 @@ export function ServerPanel() {
 
   return (
     <div className="server-panel">
-      {/* ---- theme switcher ---- */}
-      <div className="theme-row">
-        <span className="theme-label">🎨 主题</span>
-        <select value={theme} onChange={(ev) => setTheme(ev.target.value as never)} title="切换配色模式">
-          <option value="dark">🌙 深色</option>
-          <option value="light">☀️ 日间</option>
-          <option value="ocean">🌊 海洋</option>
-          <option value="forest">🌲 森林</option>
-          <option value="sakura">🌸 樱花</option>
-        </select>
-      </div>
-
       {/* ---- hosts ---- */}
       <h3>主机</h3>
       {connections.map((c) => {
@@ -240,7 +227,7 @@ export function ServerPanel() {
         );
       })}
       <button className="small host-add" onClick={() => setShowAdd(true)}>
-        + 添加主机
+        <Icon name="plus" size={12} /> 添加主机
       </button>
       {connected && (
         <button className="small host-add disconnect" onClick={disconnect}>
@@ -256,10 +243,12 @@ export function ServerPanel() {
           {serverError && <div className="error-text small-err">{serverError}</div>}
           {serverInfo && (
             <div className="stats">
-              <Stat label="内存" pct={memPct} text={`${fmtSize(serverInfo.memUsed)} / ${fmtSize(serverInfo.memTotal)}`} />
-              <Stat label="负载" pct={loadPct} text={`${serverInfo.load1.toFixed(2)} / ${serverInfo.cores} 核`} />
-              <Stat label="磁盘 /" pct={diskPct} text={`${fmtSize(serverInfo.diskUsed)} / ${fmtSize(serverInfo.diskTotal)}`} />
-              <div className="uptime">⏱ 已运行 {serverInfo.uptime}</div>
+              <Stat icon="activity" label="内存" pct={memPct} text={`${fmtSize(serverInfo.memUsed)} / ${fmtSize(serverInfo.memTotal)}`} />
+              <Stat icon="gauge" label="负载" pct={loadPct} text={`${serverInfo.load1.toFixed(2)} / ${serverInfo.cores} 核`} />
+              <Stat icon="hardDrive" label="磁盘 /" pct={diskPct} text={`${fmtSize(serverInfo.diskUsed)} / ${fmtSize(serverInfo.diskTotal)}`} />
+              <div className="uptime">
+                <Icon name="clock" size={12} /> 已运行 {serverInfo.uptime}
+              </div>
             </div>
           )}
           {!serverInfo && !serverError && <div className="dim-note">读取中…</div>}
@@ -273,9 +262,9 @@ export function ServerPanel() {
               onKeyDown={(e) => e.key === "Enter" && listDir(pathInput || "~")}
               spellCheck={false}
             />
-            <button className="small" title="上级目录" onClick={upDir}>↑</button>
-            <button className="small" title="刷新" onClick={() => listDir(files.path)}>↻</button>
-            <button className="small" title="新建文件夹" onClick={mkdir}>＋</button>
+            <button className="small" title="上级目录" onClick={upDir}><Icon name="chevronUp" size={12} /></button>
+            <button className="small" title="刷新" onClick={() => listDir(files.path)}><Icon name="refresh" size={12} /></button>
+            <button className="small" title="新建文件夹" onClick={mkdir}><Icon name="plus" size={12} /></button>
           </div>
           {fileError && <div className="error-text small-err">{fileError}</div>}
           <div className="file-list">
@@ -283,7 +272,7 @@ export function ServerPanel() {
             {files.entries.map((e) => (
               <div key={e.name} className={`file-row ${e.dir ? "is-dir" : ""}`}>
                 <span className="file-icon" onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
-                  {e.dir ? "📁" : "📄"}
+                  <Icon name={e.dir ? "folder" : "file"} size={14} className={e.dir ? "ico-dir" : "ico-file"} />
                 </span>
                 <span className="file-name" title={`${e.name} · ${e.mtime}`} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
                   {e.name}
@@ -291,18 +280,18 @@ export function ServerPanel() {
                 </span>
                 <span className="file-ops">
                   <button className="icon-op" title={e.dir ? "打开" : "预览"} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
-                    {e.dir ? "↗" : "👁"}
+                    <Icon name={e.dir ? "arrowUpRight" : "eye"} size={13} />
                   </button>
                   {e.dir && (
                     <button className="icon-op" title="在终端打开（cd）" onClick={() => ipc.terminalWrite(sessionId!, new TextEncoder().encode(`cd ${q(e.name)} && ls -A\n`))}>
-                      ⌨
+                      <Icon name="terminal" size={13} />
                     </button>
                   )}
                   {e.name.endsWith(".sh") && (
-                    <button className="icon-op" title="执行脚本" onClick={() => execEntry(e)}>▶</button>
+                    <button className="icon-op" title="执行脚本" onClick={() => execEntry(e)}><Icon name="play" size={13} /></button>
                   )}
-                  <button className="icon-op" title="重命名" onClick={() => doRename(e)}>✎</button>
-                  <button className="icon-op danger" title="删除" onClick={() => doDelete(e)}>🗑</button>
+                  <button className="icon-op" title="重命名" onClick={() => doRename(e)}><Icon name="pencil" size={13} /></button>
+                  <button className="icon-op danger" title="删除" onClick={() => doDelete(e)}><Icon name="trash" size={13} /></button>
                 </span>
               </div>
             ))}
@@ -359,7 +348,10 @@ export function ServerPanel() {
       {op && (
         <div className="modal-backdrop">
           <div className={`modal confirm-box ${op.danger ? "critical" : "warn"}`}>
-            <h2>{op.danger ? "⛔ " : "ℹ️ "}{op.title}</h2>
+            <h2 className="confirm-title">
+              <Icon name={op.danger ? "ban" : "info"} size={16} className={op.danger ? "ico-red" : "ico-accent"} />
+              {op.title}
+            </h2>
             <div className="confirm-cmd">{op.detail}</div>
             {op.danger && <div className="degraded-note">该操作为用户主动发起，将在远端服务器执行，请确认路径正确。</div>}
             <div className="modal-foot">
@@ -390,7 +382,10 @@ export function ServerPanel() {
       {preview && (
         <div className="modal-backdrop">
           <div className="modal">
-            <h2>📄 {preview.name}</h2>
+            <h2 className="confirm-title">
+              <Icon name="file" size={16} className="ico-accent" />
+              {preview.name}
+            </h2>
             <div className="sub">前 4000 字节预览</div>
             <pre className="raw-text" style={{ maxHeight: 420 }}>
               {preview.text}
@@ -406,12 +401,14 @@ export function ServerPanel() {
   );
 }
 
-function Stat({ label, pct, text }: { label: string; pct: number; text: string }) {
+function Stat({ icon, label, pct, text }: { icon: string; label: string; pct: number; text: string }) {
   const level = pct >= 90 ? "red" : pct >= 70 ? "yellow" : "green";
   return (
     <div className="stat">
       <div className="stat-head">
-        <span>{label}</span>
+        <span className="stat-label">
+          <Icon name={icon} size={12} /> {label}
+        </span>
         <span className="stat-text">{text}</span>
       </div>
       <div className="stat-bar">

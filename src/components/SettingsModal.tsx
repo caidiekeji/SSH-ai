@@ -1,14 +1,16 @@
-// Modern settings modal: left navigation + two sections.
+// Modern settings modal: left navigation + three sections.
 //   - AI 设置: vendor dropdown → API key → fetch models → select → test → save
 //   - SSH 主机管理: list / add / delete saved connections
+//   - 外观: color theme picker (moved out of the left panel)
 // All PRD §2.2 state-machine edges (S0–S5) are preserved.
 
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../store";
 import { ipc } from "../ipc";
-import type { ConnectionConfig, ProviderProfile, ProviderSpec } from "../types";
+import type { ConnectionConfig, ProviderProfile, ProviderSpec, ThemeName } from "../types";
+import { Icon } from "./Icon";
 
-type Tab = "ai" | "ssh";
+type Tab = "ai" | "ssh" | "ui";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>("ai");
@@ -17,31 +19,42 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       <div className="settings-modal">
         <div className="settings-nav">
           <div className="settings-brand">
-            <span className="brand-mark">⚙</span>
+            <span className="brand-mark">{">_"}</span>
             <div>
               <div className="brand-title">设置</div>
               <div className="brand-sub">API Key 存于系统凭据库，绝不落盘</div>
             </div>
           </div>
           <div className={`settings-nav-item ${tab === "ai" ? "active" : ""}`} onClick={() => setTab("ai")}>
-            <span className="nav-ico">✦</span>
+            <span className="nav-ico"><Icon name="sparkles" size={15} /></span>
             <div>
               <div className="nav-t">AI 设置</div>
               <div className="nav-d">厂商 · 模型 · 连通测试</div>
             </div>
           </div>
           <div className={`settings-nav-item ${tab === "ssh" ? "active" : ""}`} onClick={() => setTab("ssh")}>
-            <span className="nav-ico">🖥</span>
+            <span className="nav-ico"><Icon name="server" size={15} /></span>
             <div>
               <div className="nav-t">SSH 主机管理</div>
               <div className="nav-d">已保存连接的增删</div>
+            </div>
+          </div>
+          <div className={`settings-nav-item ${tab === "ui" ? "active" : ""}`} onClick={() => setTab("ui")}>
+            <span className="nav-ico"><Icon name="palette" size={15} /></span>
+            <div>
+              <div className="nav-t">外观</div>
+              <div className="nav-d">配色主题</div>
             </div>
           </div>
           <div className="settings-nav-foot">
             <button onClick={onClose}>关闭</button>
           </div>
         </div>
-        <div className="settings-body">{tab === "ai" ? <AiSettings onClose={onClose} /> : <SshManager />}</div>
+        <div className="settings-body">
+          {tab === "ai" && <AiSettings onClose={onClose} />}
+          {tab === "ssh" && <SshManager />}
+          {tab === "ui" && <Appearance />}
+        </div>
       </div>
     </div>
   );
@@ -153,7 +166,7 @@ function AiSettings({ onClose }: { onClose: () => void }) {
     };
     try {
       const r = await ipc.testProvider(probe, apiKey || null);
-      setOkMsg(`✓ 连通成功：${r.model} → "${r.reply}"`);
+      setOkMsg(`连通成功：${r.model} → "${r.reply}"`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -192,7 +205,7 @@ function AiSettings({ onClose }: { onClose: () => void }) {
 
   const stepDone = {
     vendor: !!selectedSpec,
-    key: !!apiKey || (!!editingProfile && !!notice === false),
+    key: !!apiKey || !!editingProfile,
     model: !!model,
   };
 
@@ -210,7 +223,7 @@ function AiSettings({ onClose }: { onClose: () => void }) {
                 <div className="profile-model">{p.model || "未选模型"}</div>
               </div>
               <button className="icon-op danger" title="删除" onClick={() => removeProfile(p.id)}>
-                🗑
+                <Icon name="trash" size={13} />
               </button>
             </div>
           ))}
@@ -287,7 +300,7 @@ function AiSettings({ onClose }: { onClose: () => void }) {
                   onClick={fetchModels}
                   title={selectedSpec.model_list_policy === "preset" ? "Anthropic 使用预置列表" : "GET {base_url}/models"}
                 >
-                  {busy === "fetch" ? "获取中…" : "⟳ 获取模型"}
+                  <Icon name="refresh" size={12} /> {busy === "fetch" ? "获取中…" : "获取模型"}
                 </button>
                 {models.length > 0 ? (
                   <select className="w-select flex1" value={model} onChange={(e) => setModel(e.target.value)}>
@@ -314,15 +327,15 @@ function AiSettings({ onClose }: { onClose: () => void }) {
           {selectedSpec && (
             <div className="w-step">
               <div className="w-head">
-                <span className={`w-num ${okMsg.startsWith("✓") ? "done" : ""}`}>4</span>
+                <span className={`w-num ${okMsg.startsWith("连通成功") ? "done" : ""}`}>4</span>
                 测试连通并保存
               </div>
               <div className="w-row">
                 <button disabled={!model || busy !== ""} onClick={testConnection}>
-                  {busy === "test" ? "测试中…" : "⚡ 测试连通性"}
+                  <Icon name="zap" size={12} /> {busy === "test" ? "测试中…" : "测试连通性"}
                 </button>
                 <button className="primary" disabled={!model} onClick={save}>
-                  ✓ 保存 Profile
+                  <Icon name="check" size={12} /> 保存 Profile
                 </button>
               </div>
               {error && <div className="error-text">{error}</div>}
@@ -401,7 +414,7 @@ function SshManager() {
         <div className="set-title-row">
           <h3 className="set-title">已保存主机（{connections.length}）</h3>
           <button className="primary small" onClick={() => setShowAdd(!showAdd)}>
-            {showAdd ? "收起" : "+ 添加主机"}
+            <Icon name="plus" size={12} /> {showAdd ? "收起" : "添加主机"}
           </button>
         </div>
 
@@ -420,7 +433,7 @@ function SshManager() {
                 </div>
                 <span className="auth-badge">{c.auth_method === "password" ? "密码" : "私钥"}</span>
                 <button className="icon-op danger" title="删除" onClick={() => remove(c.id)}>
-                  🗑
+                  <Icon name="trash" size={13} />
                 </button>
               </div>
             );
@@ -469,5 +482,47 @@ function SshManager() {
         </section>
       )}
     </>
+  );
+}
+
+/* ================= 外观 ================= */
+
+const THEME_CARDS: { id: ThemeName; name: string; sw: [string, string, string] }[] = [
+  { id: "dark", name: "深色", sw: ["#0f1216", "#1c2128", "#4c8dff"] },
+  { id: "light", name: "日间", sw: ["#ffffff", "#f6f8fa", "#0969da"] },
+  { id: "ocean", name: "海洋", sw: ["#0b1220", "#152238", "#38bdf8"] },
+  { id: "forest", name: "森林", sw: ["#0c1310", "#17251c", "#34d399"] },
+  { id: "sakura", name: "樱花", sw: ["#171015", "#271c23", "#f472b6"] },
+];
+
+function Appearance() {
+  const theme = useStore((s) => s.theme);
+  const setTheme = useStore((s) => s.setTheme);
+  return (
+    <section className="set-section">
+      <h3 className="set-title">配色主题</h3>
+      <div className="theme-grid">
+        {THEME_CARDS.map((t) => (
+          <div
+            key={t.id}
+            className={`theme-card ${theme === t.id ? "active" : ""}`}
+            onClick={() => setTheme(t.id)}
+          >
+            <div className="theme-preview">
+              <span style={{ background: t.sw[0] }} />
+              <span style={{ background: t.sw[1] }} />
+              <span style={{ background: t.sw[2] }} />
+            </div>
+            <span className="theme-name">
+              {t.name}
+              {theme === t.id && <Icon name="check" size={12} className="ico-accent" />}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="dim-note" style={{ marginTop: 10 }}>
+        切换即时生效并自动保存；终端配色会跟随主题同步变化。
+      </div>
+    </section>
   );
 }
