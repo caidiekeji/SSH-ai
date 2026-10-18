@@ -7,6 +7,7 @@ import { useStore } from "../store";
 import { ipc } from "../ipc";
 import type { DiagnosisCard as Card } from "../types";
 import { Icon } from "./Icon";
+import { Markdown } from "./Markdown";
 
 export function AiSidebar() {
   const cards = useStore((s) => s.cards);
@@ -77,8 +78,8 @@ export function AiSidebar() {
                 {m.role === "user" ? (
                   <div className="bubble user">{m.content}</div>
                 ) : (
-                  <div className="bubble ai">
-                    {m.content || (i === chatHistory.length - 1 ? "…" : "")}
+                  <div className="bubble ai md-scroll">
+                    {m.content ? <Markdown text={m.content} /> : i === chatHistory.length - 1 ? "…" : ""}
                   </div>
                 )}
               </div>
@@ -242,7 +243,9 @@ function ChatMessage({ card }: { card: Card }) {
           <div className="dcard-title analyzing">
             <Icon name="sparkles" size={14} className="ai-ico" /> 正在分析<span className="dots">…</span>
           </div>
-          <pre className="raw-text stream">{card.streamingText || "等待模型响应…"}</pre>
+          <div className="raw-text stream md-scroll">
+            <Markdown text={card.streamingText || "等待模型响应…"} />
+          </div>
         </div>
       </div>
     );
@@ -274,7 +277,9 @@ function ChatMessage({ card }: { card: Card }) {
         {card.question && <div className="bubble user">{card.question}</div>}
         <div className="dcard degraded">
           <div className="dcard-title">回复原文</div>
-          <pre className="raw-text">{r.raw}</pre>
+          <div className="raw-text md-scroll">
+            <Markdown text={r.raw ?? ""} />
+          </div>
           <div className="note-warn">模型未返回结构化结果，无法提供"插入"。建议在设置中更换模型。</div>
           <div className="dcard-foot">
             <button className="mini icon-only" title="复制" aria-label="复制" onClick={() => navigator.clipboard.writeText(r.raw ?? "")}><Icon name="copy" size={12} /></button>
@@ -296,14 +301,20 @@ function ChatMessage({ card }: { card: Card }) {
         <div className="dcard-block head">
           <span className="dcard-label">问题</span>
           <div className="dcard-title-row">
-            <span className="dcard-title">{d?.summary || "诊断完成"}</span>
+            <span className="dcard-title">
+              <Markdown className="md-inline" text={d?.summary || "诊断完成"} />
+            </span>
             {d?.confidence && (
               <span className={`confidence confidence-${d.confidence}`}>
                 {d.confidence === "high" ? "高置信" : d.confidence === "medium" ? "中置信" : "低置信"}
               </span>
             )}
           </div>
-          {d?.root_cause && <div className="dcard-cause">{d.root_cause}</div>}
+          {d?.root_cause && (
+            <div className="dcard-cause">
+              <Markdown text={d.root_cause} />
+            </div>
+          )}
         </div>
 
         {/* ② 解决方法 */}
@@ -329,7 +340,9 @@ function ChatMessage({ card }: { card: Card }) {
         {r.alternative && (
           <div className="dcard-block alt">
             <span className="dcard-label">补充</span>
-            <div className="dcard-cause">{r.alternative}</div>
+            <div className="dcard-cause">
+              <Markdown text={r.alternative} />
+            </div>
           </div>
         )}
 
@@ -376,7 +389,9 @@ function StepRow({
       <div className="dstep-top">
         <span className={`risk-dot ${dotColor}`} title={`AI 建议: ${hint}（实际以本地分级为准）`} />
         <span className="dstep-no">{index}.</span>
-        <span className="dstep-desc">{description}</span>
+        <span className="dstep-desc">
+          <Markdown className="md-inline" text={description} />
+        </span>
         <span className={`dstep-risk ${dotColor.replace("risk-", "")}`}>{riskLabel}</span>
         <button className="ins" onClick={onInsert} title="写入终端输入行，由你按 Enter 执行">
           插入
