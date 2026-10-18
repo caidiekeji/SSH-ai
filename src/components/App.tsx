@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "../store";
-import { ProviderConfigModal } from "./ProviderConfigModal";
+import { SettingsModal } from "./SettingsModal";
 import { HostKeyDialogs } from "./HostKeyDialogs";
 import { RiskConfirmDialogs } from "./RiskConfirmDialogs";
 import { AiSidebar } from "./AiSidebar";
@@ -64,7 +64,7 @@ export function App() {
       {lastPrefillNotice && <NoticeToast text={lastPrefillNotice} />}
       <HostKeyDialogs />
       <RiskConfirmDialogs />
-      {configOpen && <ProviderConfigModal onClose={() => setConfigOpen(false)} />}
+      {configOpen && <SettingsModal onClose={() => setConfigOpen(false)} />}
     </div>
   );
 }

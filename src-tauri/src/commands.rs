@@ -552,7 +552,7 @@ pub async fn exec_oneshot(
     command: String,
 ) -> Result<String, String> {
     use russh::ChannelMsg;
-    // Clone the tokio Mutex out of the map, then drop the std guard BEFORE
+    // Clone the Arc'd cell out of the map, then drop the std guard BEFORE
     // any await so the future stays Send.
     let handle_cell = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -561,18 +561,20 @@ pub async fn exec_oneshot(
             .map(|s| s.handle.clone())
             .ok_or("会话不存在")?
     };
-    let handle = handle_cell
-        .lock()
-        .await
-        .clone()
-        .ok_or("会话已断开")?;
-    let mut ch = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| format!("打开执行通道失败: {e}"))?;
-    ch.exec(true, &command)
-        .await
-        .map_err(|e| format!("执行失败: {e}"))?;
+    // russh Handle is not Clone: open the exec channel while holding the
+    // guard, then release it before the (potentially slow) read loop.
+    let mut ch = {
+        let mut guard = handle_cell.lock().await;
+        let handle = guard.as_mut().ok_or("会话已断开")?;
+        let mut ch = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("打开执行通道失败: {e}"))?;
+        ch.exec(true, &command)
+            .await
+            .map_err(|e| format!("执行失败: {e}"))?;
+        ch
+    };
 
     let mut out = Vec::new();
     loop {
