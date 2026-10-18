@@ -142,9 +142,9 @@ let diagRunning = false;
 // Previous raw byte/sector counters (for computing per-second rates).
 let lastIoRaw: { sessionId: number; rx: number; tx: number; dr: number; dw: number; t: number } | null = null;
 
-// Retry helper for transient AI errors (network / timeout / rate limit).
-// Auth-classified errors and non-matching messages fail immediately.
-const RETRYABLE_AI_ERRORS = ["网络", "超时", "频率", "HTTP 5", "HTTP 429", "连接"];
+// Retry helper for transient AI errors (network / timeout / rate limit /
+// mid-stream interruption). Auth-classified errors fail immediately.
+const RETRYABLE_AI_ERRORS = ["网络", "超时", "频率", "HTTP 5", "HTTP 429", "连接", "响应中断", "读取超时", "流式"];
 async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   let lastErr: unknown;
   for (let a = 0; a < attempts; a++) {
