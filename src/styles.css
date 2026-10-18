@@ -775,42 +775,35 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
 
-/* ---- bottom input bar: floating pill composer ----
+/* ---- bottom input bar: full-width docked composer, aligned with panes above ----
    '#' prefix = AI, otherwise send command to terminal */
 .inputbar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin: 2px 14px 12px;
-  padding: 4px 4px 4px 13px;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
-}
-.inputbar:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft), 0 4px 18px rgba(0, 0, 0, 0.22);
+  gap: 8px;
+  padding: 8px 14px 10px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
 }
 .inputbar .mode-ico { display: inline-flex; align-items: center; color: var(--text-dim); flex-shrink: 0; }
 .inputbar.ai-mode .mode-ico { color: var(--ai); }
 .inputbar input {
   flex: 1;
   min-width: 0;
-  border: none;
-  background: transparent;
-  box-shadow: none;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
   font-family: var(--mono);
   font-size: 13px;
-  padding: 9px 8px;
+  padding: 13px 14px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
-.inputbar input:focus { border: none; box-shadow: none; }
+.inputbar input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
 .inputbar .send-btn {
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   padding: 0;
-  border-radius: 50%;
+  border-radius: 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
