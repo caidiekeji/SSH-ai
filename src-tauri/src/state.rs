@@ -25,10 +25,25 @@ pub struct ConnectionConfig {
     pub key_path: Option<String>,
 }
 
-/// Global app settings (non-sensitive). `system_prompt` is an optional
-/// user-written style directive; `prompt_for_diag`/`prompt_for_chat` choose
-/// which AI modes it applies to. `diagnosis_depth`: how many recent
-/// command-output blocks one-click diagnosis feeds to the AI (1 = latest only).
+/// One named prompt in the prompt library. A prompt can target the
+/// diagnosis mode, the chat mode, or both; all prompts enabled for a mode
+/// are joined as that mode's custom directive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptEntry {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub for_diag: bool,
+    #[serde(default)]
+    pub for_chat: bool,
+}
+
+/// Global app settings (non-sensitive). `prompts` is the prompt library;
+/// `system_prompt`/`prompt_for_*` are legacy fields kept only to migrate the
+/// pre-library single prompt on first read. `diagnosis_depth`: how many
+/// recent command-output blocks one-click diagnosis feeds to the AI.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -39,6 +54,8 @@ pub struct AppSettings {
     pub prompt_for_diag: bool,
     #[serde(default = "default_true")]
     pub prompt_for_chat: bool,
+    #[serde(default)]
+    pub prompts: Vec<PromptEntry>,
     /// Agent mode: auto-execute green (low-risk) commands without approval.
     #[serde(default = "default_true")]
     pub agent_auto_green: bool,
@@ -149,23 +166,29 @@ impl AppState {
         s.diagnosis_depth.clamp(1, 10)
     }
 
-    /// Custom prompt for diagnosis mode (None when disabled or empty).
+    /// Custom prompt for diagnosis mode: all library prompts enabled for
+    /// 诊断 joined (None when empty). Legacy single prompt is migrated by
+    /// the list_prompts command, so this only reads the library.
     pub fn diag_prompt(&self) -> Option<String> {
-        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
-        if s.prompt_for_diag {
-            Some(s.system_prompt.trim().to_string()).filter(|p| !p.is_empty())
-        } else {
-            None
-        }
+        Self::join_prompts(&self.settings.lock().unwrap_or_else(|e| e.into_inner()).prompts, true)
     }
 
-    /// Custom prompt for chat mode (None when disabled or empty).
+    /// Custom prompt for chat mode (same join rule, 对话 flag).
     pub fn chat_prompt(&self) -> Option<String> {
-        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
-        if s.prompt_for_chat {
-            Some(s.system_prompt.trim().to_string()).filter(|p| !p.is_empty())
-        } else {
+        Self::join_prompts(&self.settings.lock().unwrap_or_else(|e| e.into_inner()).prompts, false)
+    }
+
+    fn join_prompts(prompts: &[PromptEntry], for_diag: bool) -> Option<String> {
+        let joined: Vec<&str> = prompts
+            .iter()
+            .filter(|p| if for_diag { p.for_diag } else { p.for_chat })
+            .map(|p| p.content.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if joined.is_empty() {
             None
+        } else {
+            Some(joined.join("\n\n").chars().take(4000).collect())
         }
     }
 

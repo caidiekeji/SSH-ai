@@ -105,10 +105,14 @@ export const ipc = {
   setMcpConfig: (enabled: boolean, port: number) => invoke<void>("set_mcp_config", { enabled, port }),
 
   // ---- AI system prompt (global, optional) ----
-  getSystemPrompt: () =>
-    invoke<{ prompt: string; forDiag: boolean; forChat: boolean }>("get_system_prompt"),
-  setSystemPrompt: (prompt: string, forDiag: boolean, forChat: boolean) =>
-    invoke<void>("set_system_prompt", { prompt, forDiag, forChat }),
+  // ---- Prompt library (multiple named prompts, bound to modes) ----
+  listPrompts: () =>
+    invoke<{ id: string; name: string; content: string; forDiag: boolean; forChat: boolean }[]>(
+      "list_prompts",
+    ),
+  savePrompt: (entry: { id: string; name: string; content: string; forDiag: boolean; forChat: boolean }) =>
+    invoke<void>("save_prompt", { entry }),
+  deletePrompt: (id: string) => invoke<void>("delete_prompt", { id }),
   getDiagnosisDepth: () => invoke<number>("get_diagnosis_depth"),
   setDiagnosisDepth: (depth: number) => invoke<void>("set_diagnosis_depth", { depth }),
 

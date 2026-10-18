@@ -606,6 +606,70 @@ pub async fn agent_step(
         .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Prompt library: multiple named prompts, each bound to 诊断/对话 modes.
+// The legacy single system_prompt is migrated into one entry on first list.
+// ---------------------------------------------------------------------------
+
+fn new_prompt_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+#[tauri::command]
+pub fn list_prompts(state: State<'_, AppState>) -> Result<Vec<crate::state::PromptEntry>, String> {
+    let mut needs_save = false;
+    let out = {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        if s.prompts.is_empty() && !s.system_prompt.trim().is_empty() {
+            s.prompts.push(crate::state::PromptEntry {
+                id: new_prompt_id(),
+                name: "默认提示词".into(),
+                content: s.system_prompt.clone(),
+                for_diag: s.prompt_for_diag,
+                for_chat: s.prompt_for_chat,
+            });
+            needs_save = true;
+        }
+        s.prompts.clone()
+    };
+    if needs_save {
+        state.save_settings()?;
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn save_prompt(
+    state: State<'_, AppState>,
+    mut entry: crate::state::PromptEntry,
+) -> Result<(), String> {
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        if entry.id.is_empty() {
+            entry.id = new_prompt_id();
+        }
+        entry.name = entry.name.trim().to_string();
+        if entry.name.is_empty() {
+            entry.name = "未命名提示词".into();
+        }
+        entry.content = entry.content.chars().take(2000).collect();
+        match s.prompts.iter_mut().find(|p| p.id == entry.id) {
+            Some(p) => *p = entry.clone(),
+            None => s.prompts.push(entry.clone()),
+        }
+    }
+    state.save_settings()
+}
+
+#[tauri::command]
+pub fn delete_prompt(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.prompts.retain(|p| p.id != id);
+    }
+    state.save_settings()
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
@@ -738,39 +802,8 @@ pub async fn ai_chat(
 // built-in diagnosis prompt; the built-in schema + safety rules always apply.
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SystemPromptSettings {
-    pub prompt: String,
-    pub for_diag: bool,
-    pub for_chat: bool,
-}
-
-#[tauri::command]
-pub fn get_system_prompt(state: State<'_, AppState>) -> SystemPromptSettings {
-    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
-    SystemPromptSettings {
-        prompt: s.system_prompt.trim().to_string(),
-        for_diag: s.prompt_for_diag,
-        for_chat: s.prompt_for_chat,
-    }
-}
-
-#[tauri::command]
-pub fn set_system_prompt(
-    state: State<'_, AppState>,
-    prompt: String,
-    for_diag: bool,
-    for_chat: bool,
-) -> Result<(), String> {
-    {
-        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
-        s.system_prompt = prompt.trim().to_string();
-        s.prompt_for_diag = for_diag;
-        s.prompt_for_chat = for_chat;
-    }
-    state.save_settings()
-}
+// (The legacy get/set_system_prompt pair was replaced by the prompt library:
+//  list_prompts / save_prompt / delete_prompt above.)
 
 #[tauri::command]
 pub fn get_diagnosis_depth(state: State<'_, AppState>) -> u32 {

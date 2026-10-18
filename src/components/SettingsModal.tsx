@@ -18,7 +18,7 @@ import {
   type HostFormValues,
 } from "./HostForm";
 
-type Tab = "ai" | "aiadv" | "ssh" | "sec" | "ui" | "mcp";
+type Tab = "ai" | "aiadv" | "prompts" | "ssh" | "sec" | "ui" | "mcp";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>("ai");
@@ -60,6 +60,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               <div className="nav-d">提示词 · 诊断上下文</div>
             </div>
           </div>
+          <div className={`settings-nav-item ${tab === "prompts" ? "active" : ""}`} onClick={() => setTab("prompts")}>
+            <span className="nav-ico"><Icon name="pencil" size={15} /></span>
+            <div>
+              <div className="nav-t">提示词库</div>
+              <div className="nav-d">新增 · 编辑 · 按模式绑定</div>
+            </div>
+          </div>
           <div className={`settings-nav-item ${tab === "ssh" ? "active" : ""}`} onClick={() => setTab("ssh")}>
             <span className="nav-ico"><Icon name="server" size={15} /></span>
             <div>
@@ -95,6 +102,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         <div className="settings-body">
           {tab === "ai" && <AiSettings onClose={onClose} />}
           {tab === "aiadv" && <AiAdvanced />}
+          {tab === "prompts" && <PromptsPage />}
           {tab === "ssh" && <SshManager />}
           {tab === "sec" && <SecurityCenter />}
           {tab === "ui" && <Appearance />}
@@ -400,39 +408,10 @@ function AiSettings({ onClose }: { onClose: () => void }) {
   );
 }
 
-/* ================= AI 高级（提示词 / 诊断上下文） ================= */
+/* ================= AI 高级（诊断上下文 / Agent） ================= */
 
 function AiAdvanced() {
-  const [sysPrompt, setSysPrompt] = useState("");
-  const [sysForDiag, setSysForDiag] = useState(true);
-  const [sysForChat, setSysForChat] = useState(true);
-  const [sysSaved, setSysSaved] = useState(false);
-  const [sysBusy, setSysBusy] = useState(false);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    ipc
-      .getSystemPrompt()
-      .then((r) => {
-        setSysPrompt(r.prompt);
-        setSysForDiag(r.forDiag);
-        setSysForChat(r.forChat);
-      })
-      .catch(() => {});
-  }, []);
-  const saveSysPrompt = async () => {
-    setSysBusy(true);
-    setSysSaved(false);
-    try {
-      await ipc.setSystemPrompt(sysPrompt, sysForDiag, sysForChat);
-      setSysSaved(true);
-      setTimeout(() => setSysSaved(false), 2500);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSysBusy(false);
-    }
-  };
 
   // ---- diagnosis context depth (how many recent output blocks to feed AI) ----
   const [depth, setDepth] = useState(1);
@@ -460,39 +439,6 @@ function AiAdvanced() {
 
   return (
     <>
-      {/* global system prompt */}
-      <section className="set-section">
-        <h3 className="set-title">系统提示词（可选）</h3>
-        <div className="dim-note" style={{ marginBottom: 8 }}>
-          自定义 AI 的回答风格，例如「把我的大白话转成专业命令并解释」。保存时勾选要应用的模式；内置的输出格式与安全规则始终生效。留空使用默认。
-        </div>
-        <textarea
-          className="sys-prompt-input"
-          rows={4}
-          maxLength={2000}
-          value={sysPrompt}
-          onChange={(e) => setSysPrompt(e.target.value)}
-          placeholder="例：我是运维新手，请把我的大白话描述转成专业的排查命令，并逐步解释每条命令的作用。"
-          spellCheck={false}
-        />
-        <div className="sys-prompt-foot">
-          <div className="prompt-mode-checks">
-            <label className="check-chip">
-              <input type="checkbox" checked={sysForDiag} onChange={(e) => setSysForDiag(e.target.checked)} />
-              应用到诊断
-            </label>
-            <label className="check-chip">
-              <input type="checkbox" checked={sysForChat} onChange={(e) => setSysForChat(e.target.checked)} />
-              应用到对话
-            </label>
-          </div>
-          <span className="dim-note">{sysPrompt.length}/2000{sysSaved ? " · 已保存" : ""}</span>
-          <button className="primary small" disabled={sysBusy || (!sysForDiag && !sysForChat)} onClick={saveSysPrompt}>
-            {sysBusy ? "保存中…" : "保存提示词"}
-          </button>
-        </div>
-      </section>
-
       {/* diagnosis context depth */}
       <section className="set-section">
         <h3 className="set-title">诊断上下文</h3>
@@ -544,6 +490,160 @@ function AiAdvanced() {
       </section>
 
       {error && <div className="error-text">{error}</div>}
+    </>
+  );
+}
+
+/* ================= 提示词库（新增 / 编辑 / 删除 / 按模式绑定） ================= */
+
+interface PromptEntry {
+  id: string;
+  name: string;
+  content: string;
+  forDiag: boolean;
+  forChat: boolean;
+}
+
+const emptyPrompt: PromptEntry = { id: "", name: "", content: "", forDiag: true, forChat: true };
+
+function PromptsPage() {
+  const [prompts, setPrompts] = useState<PromptEntry[]>([]);
+  const [editing, setEditing] = useState<PromptEntry | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [okMsg, setOkMsg] = useState("");
+
+  const flash = (text: string) => {
+    setOkMsg(text);
+    setTimeout(() => setOkMsg(""), 2200);
+  };
+
+  const refresh = () => {
+    ipc.listPrompts().then(setPrompts).catch((e) => setError(String(e)));
+  };
+  useEffect(refresh, []);
+
+  const save = async () => {
+    if (!editing) return;
+    setBusy(true);
+    setError("");
+    try {
+      await ipc.savePrompt(editing);
+      setEditing(null);
+      refresh();
+      flash("提示词已保存");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (p: PromptEntry) => {
+    if (!window.confirm(`确定删除提示词「${p.name}」？`)) return;
+    try {
+      await ipc.deletePrompt(p.id);
+      refresh();
+      flash("已删除");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  return (
+    <>
+      <section className="set-section">
+        <div className="set-title-row">
+          <h3 className="set-title">提示词库（{prompts.length}）</h3>
+          <button className="primary small" onClick={() => setEditing({ ...emptyPrompt })}>
+            <Icon name="plus" size={12} /> 新增提示词
+          </button>
+        </div>
+        <div className="dim-note" style={{ marginBottom: 10 }}>
+          每条提示词可绑定到「诊断」「对话」模式；同一模式启用多条时按列表顺序合并生效。内置的输出格式与安全规则始终优先。
+        </div>
+
+        {editing && (
+          <div className="prompt-form">
+            <div className="form-grid">
+              <label>名称</label>
+              <input
+                value={editing.name}
+                onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                placeholder="例：运维新手风格"
+                maxLength={30}
+              />
+              <label>内容</label>
+              <textarea
+                className="sys-prompt-input"
+                rows={5}
+                maxLength={2000}
+                value={editing.content}
+                onChange={(e) => setEditing({ ...editing, content: e.target.value })}
+                placeholder="例：我是运维新手，请把我的大白话描述转成专业的排查命令，并逐步解释每条命令的作用。"
+                spellCheck={false}
+              />
+              <label>应用模式</label>
+              <div className="prompt-mode-checks">
+                <label className="check-chip">
+                  <input
+                    type="checkbox"
+                    checked={editing.forDiag}
+                    onChange={(e) => setEditing({ ...editing, forDiag: e.target.checked })}
+                  />
+                  诊断
+                </label>
+                <label className="check-chip">
+                  <input
+                    type="checkbox"
+                    checked={editing.forChat}
+                    onChange={(e) => setEditing({ ...editing, forChat: e.target.checked })}
+                  />
+                  对话
+                </label>
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button onClick={() => setEditing(null)}>取消</button>
+              <button
+                className="primary"
+                disabled={busy || !editing.content.trim() || (!editing.forDiag && !editing.forChat)}
+                onClick={save}
+              >
+                {busy ? "保存中…" : editing.id ? "保存修改" : "创建"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!editing && (
+          <div className="prompt-list">
+            {prompts.length === 0 && <div className="dim-note">暂无提示词，点击「新增提示词」创建。</div>}
+            {prompts.map((p) => (
+              <div key={p.id} className="prompt-card">
+                <div className="prompt-card-head">
+                  <span className="prompt-name">{p.name}</span>
+                  <div className="prompt-badges">
+                    {p.forDiag && <span className="auth-badge">诊断</span>}
+                    {p.forChat && <span className="auth-badge">对话</span>}
+                  </div>
+                </div>
+                <div className="prompt-preview">{p.content}</div>
+                <div className="prompt-card-foot">
+                  <button className="small" onClick={() => setEditing({ ...p })}>
+                    <Icon name="pencil" size={12} /> 编辑
+                  </button>
+                  <button className="small" onClick={() => remove(p)}>
+                    删除
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {okMsg && <div className="ok-text" style={{ marginTop: 8 }}>{okMsg}</div>}
+        {error && <div className="error-text" style={{ marginTop: 8 }}>{error}</div>}
+      </section>
     </>
   );
 }
