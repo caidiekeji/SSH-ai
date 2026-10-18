@@ -99,6 +99,8 @@ pub fn run() {
             commands::parse_preview,
             // Server dashboard (user-initiated exec, never AI-driven)
             commands::exec_oneshot,
+            // Private key upload (file stored in app-private dir)
+            commands::save_uploaded_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

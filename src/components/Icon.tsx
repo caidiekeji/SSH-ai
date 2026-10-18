@@ -113,6 +113,12 @@ const P: Record<string, ReactNode> = {
     </>
   ),
   chevronUp: <path d="m18 15-6-6-6 6" />,
+  plus: (
+    <>
+      <path d="M5 12h14" />
+      <path d="M12 5v14" />
+    </>
+  ),
   check: <path d="M20 6 9 17l-5-5" />,
   zap: <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />,
   key: (

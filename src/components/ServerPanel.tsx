@@ -38,8 +38,10 @@ export function ServerPanel() {
     authMethod: "password" as "password" | "publickey",
     password: "",
     keyPath: "",
+    keyFileName: "",
   });
   const [err, setErr] = useState("");
+  const [keyBusy, setKeyBusy] = useState(false);
   const [pathInput, setPathInput] = useState("~");
   const [op, setOp] = useState<{ title: string; danger: boolean; detail: string; run: () => Promise<void> } | null>(null);
   const [preview, setPreview] = useState<{ name: string; text: string } | null>(null);
@@ -88,6 +90,23 @@ export function ServerPanel() {
     }
   };
 
+  const onKeyFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setKeyBusy(true);
+    setErr("");
+    try {
+      const content = await f.text();
+      const path = await ipc.saveUploadedKey(`key-${Date.now()}`, content);
+      setForm((prev) => ({ ...prev, keyPath: path, keyFileName: f.name }));
+    } catch (err) {
+      setErr(String(err));
+    } finally {
+      setKeyBusy(false);
+      e.target.value = "";
+    }
+  };
+
   const quickConnect = async () => {
     const st = useStore.getState();
     st.setConn({ connStatus: "connecting", connError: "", activeHost: `${form.host}:${form.port}` });
@@ -99,7 +118,7 @@ export function ServerPanel() {
         auth:
           form.authMethod === "password"
             ? { kind: "password", password: form.password }
-            : { kind: "publickey", key_path: form.keyPath, passphrase: null },
+            : { kind: "publickey", key_path: form.keyPath, passphrase: form.password || null },
       });
       const conn: ConnectionConfig = {
         id: `conn-${Date.now()}`,
@@ -110,7 +129,8 @@ export function ServerPanel() {
         auth_method: form.authMethod,
         key_path: form.authMethod === "publickey" ? form.keyPath : null,
       };
-      await ipc.saveConnection(conn, form.authMethod === "password" ? form.password : null);
+      // password = SSH password for password auth, key passphrase for pubkey.
+      await ipc.saveConnection(conn, form.password || null);
       await loadConnections();
       st.setConn({ sessionId: res.sessionId, connStatus: "connected" });
       setShowAdd(false);
@@ -226,8 +246,8 @@ export function ServerPanel() {
           </div>
         );
       })}
-      <button className="small host-add" onClick={() => setShowAdd(true)}>
-        <Icon name="plus" size={12} /> 添加主机
+      <button className="host-add" onClick={() => setShowAdd(true)}>
+        <Icon name="plus" size={14} /> 添加主机
       </button>
       {connected && (
         <button className="small host-add disconnect" onClick={disconnect}>
@@ -302,7 +322,7 @@ export function ServerPanel() {
       {/* ---- add host modal (unchanged behavior) ---- */}
       {showAdd && (
         <div className="modal-backdrop">
-          <div className="modal">
+          <div className="modal modal-sm">
             <h2>连接主机</h2>
             <div className="sub">首次连接将展示主机指纹，需要你确认信任（TOFU）。</div>
             <div className="form-grid">
@@ -326,10 +346,20 @@ export function ServerPanel() {
                 </>
               ) : (
                 <>
-                  <label>私钥路径</label>
-                  <input value={form.keyPath} onChange={(e) => setForm({ ...form, keyPath: e.target.value })} placeholder="C:\Users\you\.ssh\id_ed25519" />
+                  <label>私钥文件</label>
+                  <div className="key-upload">
+                    <label className={`upload-btn ${keyBusy ? "busy" : ""}`}>
+                      <Icon name="file" size={13} /> {keyBusy ? "上传中…" : "选择文件上传"}
+                      <input type="file" style={{ display: "none" }} onChange={onKeyFile} accept=".pem,.key,.ppk,id_rsa,id_ed25519,id_ecdsa" />
+                    </label>
+                    <span className="key-file-name" title={form.keyPath}>
+                      {form.keyFileName || "未选择（也可手动填路径）"}
+                    </span>
+                  </div>
+                  <label>或路径</label>
+                  <input value={form.keyPath} onChange={(e) => setForm({ ...form, keyPath: e.target.value })} placeholder="C:\Users\you\.ssh\id_ed25519" spellCheck={false} />
                   <label>私钥口令</label>
-                  <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="无则留空" />
+                  <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="无则留空，存入系统凭据库" />
                 </>
               )}
             </div>

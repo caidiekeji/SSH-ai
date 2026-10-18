@@ -369,7 +369,26 @@ function SshManager() {
     authMethod: "password" as "password" | "publickey",
     password: "",
     keyPath: "",
+    keyFileName: "",
   });
+  const [keyBusy, setKeyBusy] = useState(false);
+
+  const onKeyFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setKeyBusy(true);
+    setErr("");
+    try {
+      const content = await f.text();
+      const path = await ipc.saveUploadedKey(`key-${Date.now()}`, content);
+      setForm((prev) => ({ ...prev, keyPath: path, keyFileName: f.name }));
+    } catch (err) {
+      setErr(String(err));
+    } finally {
+      setKeyBusy(false);
+      e.target.value = "";
+    }
+  };
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -391,10 +410,10 @@ function SshManager() {
         auth_method: form.authMethod,
         key_path: form.authMethod === "publickey" ? form.keyPath : null,
       };
-      await ipc.saveConnection(conn, form.authMethod === "password" ? form.password : null);
+      await ipc.saveConnection(conn, form.password || null);
       await loadConnections();
       setShowAdd(false);
-      setForm({ name: "", host: "", port: 22, username: "root", authMethod: "password", password: "", keyPath: "" });
+      setForm({ name: "", host: "", port: 22, username: "root", authMethod: "password", password: "", keyPath: "", keyFileName: "" });
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -466,8 +485,20 @@ function SshManager() {
                 </>
               ) : (
                 <>
+                  <label>私钥文件</label>
+                  <div className="key-upload">
+                    <label className={`upload-btn ${keyBusy ? "busy" : ""}`}>
+                      <Icon name="file" size={13} /> {keyBusy ? "上传中…" : "选择文件上传"}
+                      <input type="file" style={{ display: "none" }} onChange={onKeyFile} accept=".pem,.key,.ppk,id_rsa,id_ed25519,id_ecdsa" />
+                    </label>
+                    <span className="key-file-name" title={form.keyPath}>
+                      {form.keyFileName || "未选择（也可手动填路径）"}
+                    </span>
+                  </div>
                   <label>私钥路径</label>
                   <input value={form.keyPath} onChange={(e) => setForm({ ...form, keyPath: e.target.value })} placeholder="C:\Users\you\.ssh\id_ed25519" spellCheck={false} />
+                  <label>私钥口令</label>
+                  <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="无则留空，存入系统凭据库" />
                 </>
               )}
             </div>

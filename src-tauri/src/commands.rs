@@ -542,6 +542,37 @@ pub fn parse_preview(raw: String) -> serde_json::Value {
     serde_json::to_value(parse_response(&raw, false)).unwrap_or_default()
 }
 
+/// Save an uploaded private key into the app-private keys directory and
+/// return the path to use as `key_path`. Private keys are file-type secrets
+/// (the keyring stores the passphrase, not the key body).
+#[tauri::command]
+pub fn save_uploaded_key(
+    state: State<'_, AppState>,
+    name: String,
+    content: String,
+) -> Result<String, String> {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let dir = state.data_dir.join("keys");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建密钥目录失败: {e}"))?;
+    let path = dir.join(format!("{safe}.key"));
+    std::fs::write(&path, content.as_bytes()).map_err(|e| format!("写入私钥失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Run a one-shot command on a fresh exec channel (NOT the PTY). Powers the
 /// server dashboard probe and explicit user-initiated file operations.
 /// This path is USER-triggered only — AI output never reaches it (HC-03).

@@ -15,31 +15,11 @@ export function AiSidebar() {
   const sessionId = useStore((s) => s.sessionId);
   const connStatus = useStore((s) => s.connStatus);
   const listRef = useRef<HTMLDivElement>(null);
-  const taRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-scroll to the newest message.
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [cards, diagState]);
-
-  const send = () => {
-    const ta = taRef.current;
-    const text = ta?.value.trim();
-    if (!text) return;
-    if (diagState === "T1_ANALYZING") return;
-    useStore.setState({ diagError: "" });
-    void useStore.getState().startDiagnosis(text);
-    if (ta) {
-      ta.value = "";
-      ta.style.height = "auto";
-      ta.focus();
-    }
-  };
-
-  const autoGrow = (el: HTMLTextAreaElement) => {
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-  };
 
   const analyzing = diagState === "T1_ANALYZING";
 
@@ -93,28 +73,12 @@ export function AiSidebar() {
         </div>
       )}
 
-      {/* composer: same width as the panel, taller, SVG send inside */}
-      <div className={`composer ${analyzing ? "busy" : ""}`}>
-        <textarea
-          ref={taRef}
-          rows={3}
-          placeholder={analyzing ? "AI 正在分析…" : "向 AI 描述问题…（Enter 发送 · Shift+Enter 换行）"}
-          disabled={analyzing}
-          onChange={(e) => autoGrow(e.target)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
-        />
-        <button className="send-btn" onClick={send} disabled={analyzing} title="发送 (Enter)">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M22 2 11 13" />
-            <path d="M22 2 15 22l-4-9-9-4z" />
-          </svg>
-        </button>
-      </div>
+      {/* Input lives in the single bottom bar (# = AI, plain = command). */}
+      {analyzing && (
+        <div className="analyzing-strip">
+          <Icon name="sparkles" size={13} className="ai-ico spin" /> 正在分析，结果将显示在这里
+        </div>
+      )}
     </div>
   );
 }
