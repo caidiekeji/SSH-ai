@@ -55,6 +55,8 @@ export const ipc = {
   deleteProfile: (profileId: string) => invoke<void>("delete_profile", { profileId }),
   hasApiKey: (profileId: string) => invoke<boolean>("has_api_key", { profileId }),
   deleteApiKey: (profileId: string) => invoke<void>("delete_api_key", { profileId }),
+  // ---- Unified credential center: SSH secrets (password / passphrase) ----
+  deleteSavedPassword: (connId: string) => invoke<void>("delete_saved_password", { connId }),
   fetchModels: (profile: ProviderProfile, apiKey: string | null) =>
     invoke<{ id: string }[]>("fetch_models", { profile, apiKey }),
   testProvider: (profile: ProviderProfile, apiKey: string | null) =>

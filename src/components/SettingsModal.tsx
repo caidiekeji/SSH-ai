@@ -18,7 +18,7 @@ import {
   type HostFormValues,
 } from "./HostForm";
 
-type Tab = "ai" | "ssh" | "ui";
+type Tab = "ai" | "ssh" | "sec" | "ui";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>("ai");
@@ -50,6 +50,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               <div className="nav-d">已保存连接的增删</div>
             </div>
           </div>
+          <div className={`settings-nav-item ${tab === "sec" ? "active" : ""}`} onClick={() => setTab("sec")}>
+            <span className="nav-ico"><Icon name="key" size={15} /></span>
+            <div>
+              <div className="nav-t">凭据管理</div>
+              <div className="nav-d">全项目 Token 统一管理</div>
+            </div>
+          </div>
           <div className={`settings-nav-item ${tab === "ui" ? "active" : ""}`} onClick={() => setTab("ui")}>
             <span className="nav-ico"><Icon name="palette" size={15} /></span>
             <div>
@@ -64,6 +71,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         <div className="settings-body">
           {tab === "ai" && <AiSettings onClose={onClose} />}
           {tab === "ssh" && <SshManager />}
+          {tab === "sec" && <SecurityCenter />}
           {tab === "ui" && <Appearance />}
         </div>
       </div>
@@ -285,8 +293,7 @@ function AiSettings({ onClose }: { onClose: () => void }) {
         </div>
       </section>
 
-      {/* unified token management */}
-      <TokenManager />
+      {/* AI tab keeps provider config only; tokens live in the 凭据中心 tab */}
 
       {/* config wizard */}
       <section className="set-section">
@@ -411,37 +418,74 @@ function AiSettings({ onClose }: { onClose: () => void }) {
   );
 }
 
-/* ================= Token 统一管理 ================= */
+/* ================= 凭据中心（全项目 Token 统一管理） ================= */
 
-function TokenManager() {
+interface CredRow {
+  kind: "ai" | "ssh";
+  id: string;
+  name: string;
+  sub: string;
+  kindLabel: string;
+  has: boolean;
+}
+
+function SecurityCenter() {
   const profiles = useStore((s) => s.profiles);
-  const [keyState, setKeyState] = useState<Record<string, boolean>>({});
+  const connections = useStore((s) => s.connections);
+  const loadConnections = useStore((s) => s.loadConnections);
+  const [state, setState] = useState<Record<string, boolean>>({});
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const ids = profiles.map((p) => p.id).join(",");
-  const refreshKeys = async () => {
-    const entries = await Promise.all(
-      profiles.map(async (p) => [p.id, await ipc.hasApiKey(p.id).catch(() => false)] as const),
-    );
-    setKeyState(Object.fromEntries(entries));
+  const sig = profiles.map((p) => p.id).join(",") + "|" + connections.map((c) => c.id).join(",");
+  const refresh = async () => {
+    const entries: [string, boolean][] = [];
+    for (const p of profiles) entries.push([`ai:${p.id}`, await ipc.hasApiKey(p.id).catch(() => false)]);
+    for (const c of connections) entries.push([`ssh:${c.id}`, await ipc.hasSavedPassword(c.id).catch(() => false)]);
+    setState(Object.fromEntries(entries));
   };
   useEffect(() => {
-    refreshKeys();
+    refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ids]);
+  }, [sig]);
 
-  const saveKey = async (p: ProviderProfile) => {
+  const rows: CredRow[] = [
+    ...profiles.map((p) => ({
+      kind: "ai" as const,
+      id: p.id,
+      name: p.name,
+      sub: `${p.provider_id} · ${p.model || "未选模型"}`,
+      kindLabel: "AI API Key",
+      has: !!state[`ai:${p.id}`],
+    })),
+    ...connections.map((c) => ({
+      kind: "ssh" as const,
+      id: c.id,
+      name: c.name,
+      sub: `${c.username}@${c.host}:${c.port}`,
+      kindLabel: c.auth_method === "password" ? "SSH 密码" : "私钥口令",
+      has: !!state[`ssh:${c.id}`],
+    })),
+  ];
+
+  const saveSecret = async (row: CredRow) => {
     if (!draft.trim()) return;
     setBusy(true);
     try {
-      await ipc.saveProfile(p, draft.trim());
+      if (row.kind === "ai") {
+        const p = profiles.find((x) => x.id === row.id);
+        if (p) await ipc.saveProfile(p, draft.trim());
+      } else {
+        const c = connections.find((x) => x.id === row.id);
+        if (c) await ipc.saveConnection(c, draft.trim());
+      }
       setEditing(null);
       setDraft("");
-      setMsg(`已更新「${p.name}」的 API Key`);
-      await refreshKeys();
+      setMsg(`已更新「${row.name}」的${row.kindLabel}`);
+      await refresh();
+      if (row.kind === "ssh") await loadConnections();
       setTimeout(() => setMsg(""), 2500);
     } catch (e) {
       setMsg(String(e));
@@ -450,13 +494,14 @@ function TokenManager() {
     }
   };
 
-  const clearKey = async (p: ProviderProfile) => {
-    if (!window.confirm(`确定清除「${p.name}」已保存的 API Key？（Profile 保留，诊断前需重新填写）`)) return;
+  const clearSecret = async (row: CredRow) => {
+    if (!window.confirm(`确定清除「${row.name}」的${row.kindLabel}？（记录保留，需要时重新填写）`)) return;
     setBusy(true);
     try {
-      await ipc.deleteApiKey(p.id);
-      setMsg(`已清除「${p.name}」的 API Key`);
-      await refreshKeys();
+      if (row.kind === "ai") await ipc.deleteApiKey(row.id);
+      else await ipc.deleteSavedPassword(row.id);
+      setMsg(`已清除「${row.name}」的${row.kindLabel}`);
+      await refresh();
       setTimeout(() => setMsg(""), 2500);
     } catch (e) {
       setMsg(String(e));
@@ -465,55 +510,61 @@ function TokenManager() {
     }
   };
 
-  if (profiles.length === 0) return null;
+  const aiCount = rows.filter((r) => r.kind === "ai").length;
+  const sshCount = rows.filter((r) => r.kind === "ssh").length;
+
   return (
     <section className="set-section">
-      <h3 className="set-title">API 密钥（Token）统一管理</h3>
+      <h3 className="set-title">凭据中心（全项目统一管理）</h3>
       <div className="dim-note" style={{ marginBottom: 8 }}>
-        所有密钥仅存于系统凭据库，不落盘、不进入日志。在此集中更换或清除。
+        所有凭据（AI API Key、SSH 密码/私钥口令）统一存于系统凭据库：不落盘、不进入日志。在此集中查看、更换或清除。
+      </div>
+      <div className="cred-stats">
+        <span><Icon name="sparkles" size={12} className="ai-ico" /> AI 密钥 {aiCount} 项</span>
+        <span><Icon name="server" size={12} className="ico-accent" /> SSH 凭据 {sshCount} 项</span>
       </div>
       <div className="token-list">
-        {profiles.map((p) => {
-          const has = !!keyState[p.id];
-          return (
-            <div key={p.id} className="token-row">
-              <span className={`key-dot ${has ? "on" : "off"}`} />
-              <div className="token-main">
-                <div className="token-name">{p.name}</div>
-                <div className="token-sub">{p.provider_id} · {p.model || "未选模型"}</div>
+        {rows.length === 0 && <div className="dim-note">暂无任何凭据。配置 AI Provider 或添加主机后显示在这里。</div>}
+        {rows.map((row) => (
+          <div key={`${row.kind}:${row.id}`} className="token-row">
+            <span className={`key-dot ${row.has ? "on" : "off"}`} />
+            <div className="token-main">
+              <div className="token-name">
+                {row.name}
+                <em className="cred-kind">{row.kindLabel}</em>
               </div>
-              <span className={`auth-badge ${has ? "" : "missing"}`}>{has ? "已配置" : "未配置"}</span>
-              {editing === p.id ? (
-                <div className="token-edit">
-                  <input
-                    type="password"
-                    value={draft}
-                    autoFocus
-                    onChange={(e) => setDraft(e.target.value)}
-                    placeholder="粘贴新的 API Key"
-                    spellCheck={false}
-                  />
-                  <button className="primary small" disabled={!draft.trim() || busy} onClick={() => saveKey(p)}>保存</button>
-                  <button className="small" onClick={() => { setEditing(null); setDraft(""); }}>取消</button>
-                </div>
-              ) : (
-                <div className="token-actions">
-                  <button className="small" onClick={() => { setEditing(p.id); setDraft(""); setMsg(""); }}>
-                    <Icon name="pencil" size={12} /> {has ? "更换" : "填写"}
-                  </button>
-                  {has && (
-                    <button className="small" disabled={busy} onClick={() => clearKey(p)}>
-                      清除
-                    </button>
-                  )}
-                </div>
-              )}
+              <div className="token-sub">{row.sub}</div>
             </div>
-          );
-        })}
+            <span className={`auth-badge ${row.has ? "" : "missing"}`}>{row.has ? "已配置" : "未配置"}</span>
+            {editing === `${row.kind}:${row.id}` ? (
+              <div className="token-edit">
+                <input
+                  type="password"
+                  value={draft}
+                  autoFocus
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder={`输入新的${row.kindLabel}`}
+                  spellCheck={false}
+                />
+                <button className="primary small" disabled={!draft.trim() || busy} onClick={() => saveSecret(row)}>保存</button>
+                <button className="small" onClick={() => { setEditing(null); setDraft(""); }}>取消</button>
+              </div>
+            ) : (
+              <div className="token-actions">
+                <button className="small" onClick={() => { setEditing(`${row.kind}:${row.id}`); setDraft(""); setMsg(""); }}>
+                  <Icon name="pencil" size={12} /> {row.has ? "更换" : "填写"}
+                </button>
+                {row.has && (
+                  <button className="small" disabled={busy} onClick={() => clearSecret(row)}>
+                    清除
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
       {msg && <div className="ok-text" style={{ marginTop: 8 }}>{msg}</div>}
-      <div className="dim-note" style={{ marginTop: 6 }}>共 {profiles.length} 个 Profile，密钥状态实时读取自系统凭据库。</div>
     </section>
   );
 }

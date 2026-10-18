@@ -1278,3 +1278,17 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 .token-actions { display: flex; gap: 6px; }
 .token-edit { display: flex; gap: 6px; align-items: center; flex: 1; min-width: 240px; }
 .token-edit input { flex: 1; min-width: 0; font-size: 12px; }
+
+/* ---- credential center (unified token management) ---- */
+.cred-stats { display: flex; gap: 14px; margin-bottom: 10px; font-size: 11.5px; color: var(--text-dim); }
+.cred-stats span { display: inline-flex; align-items: center; gap: 5px; }
+.cred-kind {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--faint);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 7px;
+  vertical-align: 1px;
+}

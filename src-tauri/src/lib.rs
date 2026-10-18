@@ -81,6 +81,7 @@ pub fn run() {
             commands::save_connection,
             commands::delete_connection,
             commands::has_saved_password,
+            commands::delete_saved_password,
             // Known hosts
             commands::list_known_hosts,
             commands::remove_known_host,

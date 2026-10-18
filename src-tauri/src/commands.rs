@@ -185,6 +185,13 @@ pub fn has_saved_password(_state: State<'_, AppState>, conn_id: String) -> Resul
     Ok(keyring::get_secret(&ssh_secret_key(&conn_id))?.is_some())
 }
 
+/// Clear the stored SSH password/passphrase while keeping the connection
+/// record (unified credential center: revoke without deleting the host).
+#[tauri::command]
+pub fn delete_saved_password(_state: State<'_, AppState>, conn_id: String) -> Result<(), String> {
+    keyring::delete_secret(&ssh_secret_key(&conn_id))
+}
+
 // ---------------------------------------------------------------------------
 // Known hosts (TOFU management)
 // ---------------------------------------------------------------------------
