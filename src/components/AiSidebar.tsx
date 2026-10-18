@@ -62,6 +62,8 @@ export function AiSidebar() {
           <ChatMessage key={c.id} card={c} />
         ))}
 
+        <AgentCard />
+
         {chatHistory.length > 0 && (
           <>
             <div className="chat-sep">
@@ -131,7 +133,9 @@ function Composer() {
       ? "输入命令，Enter 直接执行"
       : mode === "diag"
         ? "描述问题，AI 将结合当前终端输出进行分析"
-        : "与 AI 自由对话（多轮），不读取终端输出";
+        : mode === "agent"
+          ? "描述运维目标，Agent 将自动规划并逐步执行（黄/红命令仍需你确认）"
+          : "与 AI 自由对话（多轮），不读取终端输出";
 
   const send = () => {
     const t = text.trim();
@@ -150,6 +154,15 @@ function Composer() {
         return;
       }
       st.startDiagnosis(t);
+    } else if (mode === "agent") {
+      if (!st.sessionId) {
+        setErr("请先连接主机再启动 Agent");
+        return;
+      }
+      st.startAgent(t);
+      setText("");
+      if (taRef.current) taRef.current.style.height = "64px";
+      return;
     } else {
       st.sendChat(t);
     }
@@ -191,6 +204,13 @@ function Composer() {
             title="结合当前终端输出进行 AI 诊断"
           >
             <Icon name="sparkles" size={12} /> 诊断
+          </button>
+          <button
+            className={`mode-chip ${mode === "agent" ? "active" : ""}`}
+            onClick={() => setMode("agent")}
+            title="AI 自动化运维：规划→分级→执行→观察 循环"
+          >
+            <Icon name="zap" size={12} /> Agent
           </button>
           <button
             className={`mode-chip ${mode === "chat" ? "active" : ""}`}
@@ -357,6 +377,84 @@ function StepRow({
         </button>
       </div>
       <code className="dstep-cmd">{command}</code>
+    </div>
+  );
+}
+
+// Agent task card: goal, executed steps, approval gate, stop control.
+function AgentCard() {
+  const status = useStore((s) => s.agentStatus);
+  const goal = useStore((s) => s.agentGoal);
+  const steps = useStore((s) => s.agentSteps);
+  const approval = useStore((s) => s.agentApproval);
+  const error = useStore((s) => s.agentError);
+  if (status === "idle") return null;
+
+  const statusText =
+    status === "running"
+      ? "执行中"
+      : status === "waiting"
+        ? "等待确认"
+        : status === "done"
+          ? "已完成"
+          : status === "failed"
+            ? "失败"
+            : "已停止";
+
+  return (
+    <div className="chat-msg">
+      <div className={`agent-card st-${status}`}>
+        <div className="agent-head">
+          <Icon name="zap" size={14} className="ico-accent" />
+          <span className="agent-title">Agent 任务</span>
+          <span className={`agent-status st-${status}`}>{statusText}</span>
+          <span className="flex1" />
+          {(status === "running" || status === "waiting") && (
+            <button className="mini close" onClick={() => useStore.getState().stopAgent()}>
+              停止
+            </button>
+          )}
+          {(status === "done" || status === "failed" || status === "stopped") && (
+            <button
+              className="mini close"
+              onClick={() => useStore.setState({ agentStatus: "idle", agentSteps: [], agentGoal: "", agentError: "", agentApproval: null })}
+            >
+              关闭
+            </button>
+          )}
+        </div>
+        <div className="agent-goal">{goal}</div>
+        <div className="agent-steps">
+          {steps.map((s) => (
+            <div key={s.no} className="agent-step">
+              <div className="agent-step-top">
+                <span className={`risk-dot risk-${s.risk === "destructive" ? "red" : s.risk === "write" ? "yellow" : "green"}`} />
+                <span className="agent-step-no">{s.no}.</span>
+                <code className="agent-step-cmd">{s.command}</code>
+              </div>
+              {s.description && <div className="agent-step-desc">{s.description}</div>}
+              {s.output && <pre className="agent-step-out">{s.output.split("\n").slice(-4).join("\n")}</pre>}
+            </div>
+          ))}
+        </div>
+        {status === "running" && <div className="agent-note"><Icon name="sparkles" size={12} className="ai-ico spin" /> AI 正在规划下一步…</div>}
+        {approval && status === "waiting" && (
+          <div className="agent-approval">
+            <div className="agent-appr-title">
+              <Icon name="alertTriangle" size={13} className="ico-yellow" />
+              {approval.level === "red" ? "高危命令，需要你确认" : "写操作命令，需要你确认"}
+            </div>
+            <code className="agent-appr-cmd">{approval.command}</code>
+            {approval.description && <div className="agent-step-desc">{approval.description}</div>}
+            <div className="agent-appr-actions">
+              <button className="primary small" onClick={() => useStore.getState().resolveAgent(true)}>批准执行</button>
+              <button className="small" onClick={() => useStore.getState().resolveAgent(false)}>拒绝</button>
+            </div>
+          </div>
+        )}
+        {status === "done" && steps.length >= 0 && <div className="agent-note ok">任务完成</div>}
+        {error && status !== "running" && status !== "waiting" && <div className="agent-note err">{error}</div>}
+      </div>
     </div>
   );
 }

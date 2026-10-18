@@ -1,7 +1,10 @@
 //! Tauri IPC commands. Rust owns the final say on security (PRD §10.3):
 //! risk grading, prefill gating, keychain access, known-hosts — all here.
 
-use crate::ai::{parse_response, run_chat, run_diagnosis, ChatTurn, DiagnosisRequest};
+use crate::ai::{
+    parse_response, run_agent_step, run_chat, run_diagnosis, AgentStepIn, ChatTurn,
+    DiagnosisRequest,
+};
 use crate::keyring_store as keyring;
 use crate::provider::specs::PROVIDER_SPECS;
 use crate::provider::{make_adapter, ProviderProfile};
@@ -553,6 +556,123 @@ pub async fn ai_diagnose(
     }
 
     outcome
+}
+
+// ---------------------------------------------------------------------------
+// Agent mode: plan ONE next step. The model returns pure data; execution and
+// risk gating happen in the frontend loop via assess_risk + exec_oneshot.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn agent_step(
+    state: State<'_, AppState>,
+    session_id: u64,
+    goal: String,
+    steps: Vec<AgentStepIn>,
+) -> Result<crate::ai::AgentStepOut, String> {
+    let (profile, key) = {
+        let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = profiles
+            .last()
+            .cloned()
+            .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+        let key = resolve_key(&state, &profile.id, None)?;
+        (profile, key)
+    };
+    let pipeline_arc = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .map(|s| s.pipeline.clone())
+            .ok_or("会话不存在")?
+    };
+    let (sys_info, tail) = {
+        let p = pipeline_arc.lock().await;
+        let n = 20.min(p.screen.lines.len());
+        let tail = p
+            .screen
+            .lines
+            .iter()
+            .skip(p.screen.lines.len() - n)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        (p.system_info.clone(), tail)
+    };
+    let sys_text = crate::pipeline::context::format_system_context(&sys_info);
+    let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
+    run_agent_step(adapter.as_ref(), &goal, &steps, &sys_text, &tail)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfig {
+    pub auto_green: bool,
+}
+
+#[tauri::command]
+pub fn get_agent_config(state: State<'_, AppState>) -> AgentConfig {
+    let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+    AgentConfig {
+        auto_green: s.agent_auto_green,
+    }
+}
+
+#[tauri::command]
+pub fn set_agent_config(state: State<'_, AppState>, auto_green: bool) -> Result<(), String> {
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.agent_auto_green = auto_green;
+    }
+    state.save_settings()
+}
+
+// ---------------------------------------------------------------------------
+// MCP server config (for external IDEs: Trae / Cursor / Claude ...). The
+// server binds 127.0.0.1 only and requires the bearer token.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub token: String,
+}
+
+#[tauri::command]
+pub fn get_mcp_config(state: State<'_, AppState>) -> Result<McpConfig, String> {
+    let mut needs_save = false;
+    let cfg = {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        if s.mcp_token.is_empty() {
+            s.mcp_token = uuid::Uuid::new_v4().simple().to_string();
+            needs_save = true;
+        }
+        McpConfig {
+            enabled: s.mcp_enabled,
+            port: if s.mcp_port == 0 { 8615 } else { s.mcp_port },
+            token: s.mcp_token.clone(),
+        }
+    };
+    if needs_save {
+        state.save_settings()?;
+    }
+    Ok(cfg)
+}
+
+#[tauri::command]
+pub fn set_mcp_config(state: State<'_, AppState>, enabled: bool, port: u16) -> Result<(), String> {
+    {
+        let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.mcp_enabled = enabled;
+        if (1024..65536).contains(&port) {
+            s.mcp_port = port;
+        }
+    }
+    state.save_settings()
 }
 
 #[tauri::command]

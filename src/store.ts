@@ -83,9 +83,9 @@ interface Store {
   theme: ThemeName;
   setTheme: (t: ThemeName) => void;
 
-  // ---- composer (AI panel): cmd | diag | chat ----
-  composerMode: "cmd" | "diag" | "chat";
-  setComposerMode: (m: "cmd" | "diag" | "chat") => void;
+  // ---- composer (AI panel): cmd | diag | agent | chat ----
+  composerMode: "cmd" | "diag" | "agent" | "chat";
+  setComposerMode: (m: "cmd" | "diag" | "agent" | "chat") => void;
 
   // ---- chat mode (multi-turn conversation) ----
   chatHistory: { role: "user" | "assistant"; content: string }[];
@@ -93,6 +93,18 @@ interface Store {
   sendChat: (text: string) => Promise<void>;
   appendChatChunk: (text: string) => void;
   clearChat: () => void;
+
+  // ---- agent mode (automated ops loop) ----
+  agentStatus: "idle" | "running" | "waiting" | "done" | "failed" | "stopped";
+  agentGoal: string;
+  agentSteps: { no: number; command: string; description: string; output: string; risk: string }[];
+  agentApproval: { command: string; description: string; level: string } | null;
+  agentError: string;
+  _agentResolve: ((ok: boolean) => void) | null;
+  agentLoop: () => Promise<void>;
+  startAgent: (goal: string) => void;
+  stopAgent: () => void;
+  resolveAgent: (ok: boolean) => void;
 
   // ---- server dashboard ----
   serverInfo: ServerInfo | null;
@@ -406,6 +418,105 @@ export const useStore = create<Store>((set, get) => ({
       ),
     })),
   clearChat: () => set({ chatHistory: [] }),
+
+  // ---- agent mode ----
+  agentStatus: "idle",
+  agentGoal: "",
+  agentSteps: [],
+  agentApproval: null,
+  agentError: "",
+  _agentResolve: null as ((ok: boolean) => void) | null,
+  startAgent: (goal) => {
+    const st = get();
+    if (!st.sessionId) return set({ diagError: "请先连接主机" });
+    if (st.agentStatus === "running" || st.agentStatus === "waiting") return;
+    set({ agentStatus: "running", agentGoal: goal, agentSteps: [], agentApproval: null, agentError: "" });
+    void get().agentLoop();
+  },
+  agentLoop: async () => {
+    const MAX_STEPS = 12;
+    for (let i = 1; i <= MAX_STEPS; i++) {
+      const st = get();
+      if (st.agentStatus !== "running" || !st.sessionId) return;
+
+      // 1. Plan the next step (AI returns pure data).
+      let step: Awaited<ReturnType<typeof ipc.agentStep>>;
+      try {
+        step = await ipc.agentStep(
+          st.sessionId,
+          st.agentGoal,
+          st.agentSteps.map((s) => ({ command: s.command, output: s.output })),
+        );
+      } catch (e) {
+        set({ agentStatus: "failed", agentError: String(e) });
+        return;
+      }
+      if (get().agentStatus !== "running") return;
+
+      if (step.action === "done") {
+        set({ agentStatus: "done" });
+        return;
+      }
+      if (step.action === "giveup") {
+        set({ agentStatus: "failed", agentError: step.reason || step.summary || "Agent 无法完成该目标" });
+        return;
+      }
+      const command = step.command || "";
+      if (!command) {
+        set({ agentStatus: "failed", agentError: "Agent 返回了空命令" });
+        return;
+      }
+
+      // 2. Local risk grading (AI hint NOT trusted — PRD §5.5).
+      const assessment = await ipc.assessRisk(command, step.riskHint || "read");
+      if (get().agentStatus !== "running") return;
+      const autoGreen = await ipc.getAgentConfig().then((c) => c.autoGreen).catch(() => true);
+      let ok = assessment.level === "green" && autoGreen;
+
+      // 3. Yellow/red (or auto-green off): wait for user approval.
+      if (!ok) {
+        set({
+          agentStatus: "waiting",
+          agentApproval: { command, description: step.description || "", level: assessment.level },
+        });
+        ok = await new Promise<boolean>((resolve) => set({ _agentResolve: resolve } as Partial<Store>));
+        if (get().agentStatus === "stopped") return;
+        set({ agentApproval: null, agentStatus: "running" });
+        if (!ok) {
+          set({ agentStatus: "stopped", agentError: "你拒绝了该命令，任务已停止" });
+          return;
+        }
+      }
+
+      // 4. Execute on the separate oneshot channel.
+      let output = "";
+      try {
+        output = await ipc.execOneshot(st.sessionId, command);
+      } catch (e) {
+        set((s) => ({
+          agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: String(e), risk: assessment.level }],
+          agentStatus: "failed",
+          agentError: `第 ${i} 步执行失败: ${String(e)}`,
+        }));
+        return;
+      }
+      if (get().agentStatus !== "running") return;
+      set((s) => ({
+        agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: output.slice(-1600), risk: assessment.level }],
+      }));
+    }
+    set({ agentStatus: "failed", agentError: `已达最大步数（${MAX_STEPS} 步），任务未完成，可检查后重试` });
+  },
+  stopAgent: () => {
+    const resolve = get()._agentResolve;
+    set({ agentStatus: "stopped", agentApproval: null, _agentResolve: null });
+    resolve?.(false);
+  },
+  resolveAgent: (ok) => {
+    const resolve = get()._agentResolve;
+    set({ _agentResolve: null });
+    resolve?.(ok);
+  },
 
   // ---- server dashboard ----
   serverInfo: null,

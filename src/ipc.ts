@@ -86,6 +86,24 @@ export const ipc = {
   aiChat: (history: { role: string; content: string }[], question: string) =>
     invoke<string>("ai_chat", { history, question }),
 
+  // ---- Agent mode (automated ops loop) ----
+  agentStep: (sessionId: number, goal: string, steps: { command: string; output: string }[]) =>
+    invoke<{
+      action: "command" | "done" | "giveup";
+      command?: string;
+      description?: string;
+      reasoning?: string;
+      summary?: string;
+      reason?: string;
+      riskHint?: string;
+    }>("agent_step", { sessionId, goal, steps }),
+  getAgentConfig: () => invoke<{ autoGreen: boolean }>("get_agent_config"),
+  setAgentConfig: (autoGreen: boolean) => invoke<void>("set_agent_config", { autoGreen }),
+
+  // ---- MCP server (external IDE integration) ----
+  getMcpConfig: () => invoke<{ enabled: boolean; port: number; token: string }>("get_mcp_config"),
+  setMcpConfig: (enabled: boolean, port: number) => invoke<void>("set_mcp_config", { enabled, port }),
+
   // ---- AI system prompt (global, optional) ----
   getSystemPrompt: () =>
     invoke<{ prompt: string; forDiag: boolean; forChat: boolean }>("get_system_prompt"),

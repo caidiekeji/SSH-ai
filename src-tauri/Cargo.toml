@@ -27,6 +27,8 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 log = "0.4"
+tiny_http = "0.12"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 panic = "abort"

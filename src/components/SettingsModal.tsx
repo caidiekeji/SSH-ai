@@ -18,7 +18,7 @@ import {
   type HostFormValues,
 } from "./HostForm";
 
-type Tab = "ai" | "aiadv" | "ssh" | "sec" | "ui";
+type Tab = "ai" | "aiadv" | "ssh" | "sec" | "ui" | "mcp";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>("ai");
@@ -81,6 +81,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               <div className="nav-d">配色主题</div>
             </div>
           </div>
+          <div className={`settings-nav-item ${tab === "mcp" ? "active" : ""}`} onClick={() => setTab("mcp")}>
+            <span className="nav-ico"><Icon name="zap" size={15} /></span>
+            <div>
+              <div className="nav-t">MCP 集成</div>
+              <div className="nav-d">供 Trae / Cursor 等 IDE 调用</div>
+            </div>
+          </div>
           <div className="settings-nav-foot">
             <div className="nav-version">AI SSH Assistant · v0.1.0</div>
           </div>
@@ -91,6 +98,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           {tab === "ssh" && <SshManager />}
           {tab === "sec" && <SecurityCenter />}
           {tab === "ui" && <Appearance />}
+          {tab === "mcp" && <McpSettings />}
         </div>
       </div>
     </div>
@@ -444,6 +452,12 @@ function AiAdvanced() {
     }
   };
 
+  // ---- agent auto-green ----
+  const [agentAutoGreen, setAgentAutoGreen] = useState(true);
+  useEffect(() => {
+    ipc.getAgentConfig().then((c) => setAgentAutoGreen(c.autoGreen)).catch(() => {});
+  }, []);
+
   return (
     <>
       {/* global system prompt */}
@@ -507,6 +521,25 @@ function AiAdvanced() {
         </div>
         <div className="dim-note" style={{ marginTop: 7 }}>
           一键诊断默认只抓取<strong>最近一次</strong>命令输出进行分析；若问题可能与前几步操作有关，可增大此值，让 AI 一起查看更早的输出（最多 10 步，消耗更多 Token）。
+        </div>
+      </section>
+
+      {/* agent mode */}
+      <section className="set-section">
+        <h3 className="set-title">Agent 自动化运维</h3>
+        <label className="check-chip">
+          <input
+            type="checkbox"
+            checked={agentAutoGreen}
+            onChange={(e) => {
+              setAgentAutoGreen(e.target.checked);
+              ipc.setAgentConfig(e.target.checked).catch((err) => setError(String(err)));
+            }}
+          />
+          自动执行低风险（绿色）命令，黄色/红色始终需要确认
+        </label>
+        <div className="dim-note" style={{ marginTop: 7 }}>
+          Agent 模式下 AI 逐步规划命令并自动观察输出；所有命令先经本地风险分级，高危操作永远弹出确认。关闭后每条命令都要手动批准。
         </div>
       </section>
 
@@ -773,6 +806,124 @@ function SshManager() {
           </div>
         </section>
       )}
+    </>
+  );
+}
+
+/* ================= MCP 集成 ================= */
+
+function McpSettings() {
+  const [enabled, setEnabled] = useState(false);
+  const [port, setPort] = useState(8615);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [okMsg, setOkMsg] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    ipc
+      .getMcpConfig()
+      .then((c) => {
+        setEnabled(c.enabled);
+        setPort(c.port);
+        setToken(c.token);
+      })
+      .catch((e) => setError(String(e)));
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setOkMsg("");
+    try {
+      await ipc.setMcpConfig(enabled, port);
+      setOkMsg(enabled ? "已保存。重启应用后服务在 127.0.0.1:" + port + " 生效" : "已保存，MCP 服务关闭");
+      setTimeout(() => setOkMsg(""), 4000);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sampleConfig = JSON.stringify(
+    {
+      mcpServers: {
+        "ai-ssh-assistant": {
+          type: "streamable-http",
+          url: `http://127.0.0.1:${port}/mcp`,
+          headers: { Authorization: `Bearer ${token || "<你的Token>"}` },
+        },
+      },
+    },
+    null,
+    2,
+  );
+
+  return (
+    <>
+      <section className="set-section">
+        <h3 className="set-title">MCP 服务（Model Context Protocol）</h3>
+        <div className="dim-note" style={{ marginBottom: 10 }}>
+          开启后，本机运行的 IDE（Trae、Cursor、Claude Code 等）可通过 MCP 协议调用本应用的能力：列出主机、连接 SSH、执行命令、读取终端输出、AI 诊断。
+          服务仅监听 127.0.0.1，并要求 Bearer Token 认证。
+        </div>
+        <div className="form-grid">
+          <label>启用服务</label>
+          <label className="check-chip">
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            在本机开放 MCP 端点（重启应用后生效）
+          </label>
+          <label>端口</label>
+          <input
+            value={port}
+            onChange={(e) => setPort(Number(e.target.value) || 8615)}
+            placeholder="8615"
+            spellCheck={false}
+          />
+          <label>Token</label>
+          <div className="key-upload">
+            <input value={token} readOnly spellCheck={false} style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 11.5 }} />
+            <button
+              className="small"
+              onClick={() => {
+                navigator.clipboard.writeText(token);
+                setOkMsg("Token 已复制");
+                setTimeout(() => setOkMsg(""), 2000);
+              }}
+            >
+              <Icon name="copy" size={12} /> 复制
+            </button>
+          </div>
+        </div>
+        {okMsg && <div className="ok-text" style={{ marginTop: 8 }}>{okMsg}</div>}
+        {error && <div className="error-text" style={{ marginTop: 8 }}>{error}</div>}
+        <div className="modal-foot">
+          <button className="primary" disabled={busy} onClick={save}>
+            {busy ? "保存中…" : "保存"}
+          </button>
+        </div>
+      </section>
+
+      <section className="set-section">
+        <h3 className="set-title">IDE 配置示例</h3>
+        <div className="dim-note" style={{ marginBottom: 8 }}>
+          将下面 JSON 加入 IDE 的 MCP 配置（Trae：设置 › MCP › 添加；Cursor：~/.cursor/mcp.json）。
+        </div>
+        <textarea
+          className="sys-prompt-input"
+          rows={9}
+          readOnly
+          value={sampleConfig}
+          spellCheck={false}
+          style={{ fontFamily: "var(--mono)", fontSize: 11.5 }}
+        />
+        <div className="sys-prompt-foot">
+          <span className="dim-note">工具：list_hosts / connect_host / exec_command / screen_tail / diagnose / disconnect</span>
+          <button className="small" onClick={() => navigator.clipboard.writeText(sampleConfig)}>
+            <Icon name="copy" size={12} /> 复制配置
+          </button>
+        </div>
+      </section>
     </>
   );
 }

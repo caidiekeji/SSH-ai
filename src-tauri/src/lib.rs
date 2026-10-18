@@ -9,6 +9,7 @@
 mod ai;
 mod commands;
 mod keyring_store;
+mod mcp;
 mod pipeline;
 mod provider;
 mod safety;
@@ -34,6 +35,18 @@ pub fn run() {
             let data_dir = handle.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
             app.manage(AppState::new(handle, data_dir));
+
+            // MCP server (external IDE agents): start if enabled in settings.
+            {
+                let st = app.state::<AppState>();
+                let enabled = {
+                    let s = st.settings.lock().unwrap_or_else(|e| e.into_inner());
+                    s.mcp_enabled
+                };
+                if enabled {
+                    mcp::start(handle.clone());
+                }
+            }
 
             // System tray: closing the window hides to tray; quitting happens
             // only through the tray menu (user requirement #1).
@@ -103,10 +116,15 @@ pub fn run() {
             // Diagnosis
             commands::ai_diagnose,
             commands::ai_chat,
+            commands::agent_step,
             commands::get_system_prompt,
             commands::set_system_prompt,
             commands::get_diagnosis_depth,
             commands::set_diagnosis_depth,
+            commands::get_agent_config,
+            commands::set_agent_config,
+            commands::get_mcp_config,
+            commands::set_mcp_config,
             commands::delete_api_key,
             commands::parse_preview,
             // Server dashboard (user-initiated exec, never AI-driven)

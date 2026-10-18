@@ -39,6 +39,16 @@ pub struct AppSettings {
     pub prompt_for_diag: bool,
     #[serde(default = "default_true")]
     pub prompt_for_chat: bool,
+    /// Agent mode: auto-execute green (low-risk) commands without approval.
+    #[serde(default = "default_true")]
+    pub agent_auto_green: bool,
+    /// MCP server (for external IDEs): enable flag, bind port, bearer token.
+    #[serde(default)]
+    pub mcp_enabled: bool,
+    #[serde(default = "default_mcp_port")]
+    pub mcp_port: u16,
+    #[serde(default)]
+    pub mcp_token: String,
 }
 
 fn default_diagnosis_depth() -> u32 {
@@ -47,6 +57,10 @@ fn default_diagnosis_depth() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_mcp_port() -> u16 {
+    8615
 }
 
 pub struct AppState {
