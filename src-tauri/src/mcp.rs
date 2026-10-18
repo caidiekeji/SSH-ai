@@ -220,6 +220,7 @@ fn tools_json() -> Value {
             "properties": { "session_id": { "type": "integer" } },
             "required": ["session_id"]
         }
+    }
     ])
 }
 
