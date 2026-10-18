@@ -146,7 +146,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 
 .app {
   display: grid;
-  grid-template-rows: 46px 1fr;
+  grid-template-rows: 46px 1fr 46px;
   height: 100%;
 }
 
@@ -345,7 +345,42 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   flex-direction: column;
   background: var(--bg);
 }
+.term-host-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .terminal-pane .term-host { flex: 1; min-height: 0; padding: 8px 10px; }
+
+/* floating diagnose button (bottom-right of terminal output) */
+.term-fab {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 15px;
+  border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+}
+.term-fab:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.term-fab:disabled { opacity: 0.75; cursor: default; }
+.term-fab .spin { animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 .terminal-empty {
   flex: 1;
   display: flex;
@@ -356,16 +391,6 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   line-height: 2;
   white-space: pre-line;
 }
-.term-toolbar {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  padding: 7px 12px;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-  font-size: 12px;
-}
-.hint-text { color: var(--faint); }
 
 /* ============================================================
    右栏：AI 对话面板
@@ -702,7 +727,7 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 
 .notice-toast {
   position: fixed;
-  bottom: 18px;
+  bottom: 60px;
   left: 50%;
   transform: translateX(-50%);
   background: var(--accent);
@@ -715,6 +740,38 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   animation: toast-in 200ms ease;
 }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+
+/* ---- bottom input bar: '#' = AI, otherwise send command to terminal ---- */
+.inputbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+.inputbar .ai-badge {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  background: var(--ai-soft);
+  color: var(--ai);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.inputbar.ai-mode .ai-badge { display: inline-flex; }
+.inputbar input {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px 13px;
+  border-radius: 9px;
+}
+.inputbar button { padding: 8px 16px; white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   .status-connecting, .notice-toast { animation: none; }
