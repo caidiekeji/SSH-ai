@@ -531,6 +531,109 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 }
 .card-foot { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
 
+/* ---- diagnosis card v2: strict 总结→根因→解决方法 skeleton ---- */
+.dcard {
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.dcard.error { border-color: rgba(248, 81, 73, 0.4); }
+.dcard.degraded { border-style: dashed; }
+.dcard.streaming { padding: 12px; }
+.dcard-title.analyzing { display: flex; align-items: center; gap: 8px; color: var(--ai); font-weight: 600; font-size: 13px; }
+.dots { animation: pulse 1.2s ease-in-out infinite; }
+
+.dcard-block {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.dcard-block.head { background: var(--panel); }
+.dcard-block.alt { border-bottom: none; background: var(--panel); }
+.dcard-label {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.dcard-title-row { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.dcard-title { font-size: 14px; font-weight: 700; line-height: 1.5; word-break: break-word; }
+.dcard-cause { font-size: 12.5px; color: var(--text-dim); line-height: 1.65; margin-top: 6px; word-break: break-word; }
+
+.dsteps { display: flex; flex-direction: column; gap: 10px; }
+.dstep { display: flex; flex-direction: column; gap: 5px; }
+.dstep-top { display: flex; align-items: flex-start; gap: 7px; }
+.dstep .risk-dot { margin-top: 4px; }
+.dstep-no { font-size: 12.5px; font-weight: 700; color: var(--text); flex-shrink: 0; }
+.dstep-desc { flex: 1; font-size: 12.5px; line-height: 1.55; min-width: 0; word-break: break-word; }
+.dstep-risk {
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 7px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.dstep-risk.green { color: var(--green); background: rgba(63, 185, 80, 0.12); }
+.dstep-risk.yellow { color: var(--yellow); background: rgba(210, 153, 34, 0.12); }
+.dstep-risk.red { color: var(--red); background: rgba(248, 81, 73, 0.12); }
+.dstep .ins {
+  font-size: 11px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border);
+  padding: 3px 11px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.dstep .ins:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.dstep-cmd {
+  display: block;
+  background: var(--cmd-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-left: 16px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--cmd-text);
+  word-break: break-all;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.dcard-foot {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 14px;
+}
+.mini {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  padding: 3px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.mini:hover { color: var(--text); border-color: var(--accent); }
+.mini.close:hover { color: var(--red); border-color: var(--red); }
+
+.note-warn {
+  font-size: 11.5px;
+  color: var(--yellow);
+  background: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.25);
+  border-radius: 8px;
+  padding: 6px 9px;
+  margin-top: 8px;
+}
+
 .diag-error-box {
   border: 1px solid rgba(248, 81, 73, 0.45);
   background: rgba(248, 81, 73, 0.07);

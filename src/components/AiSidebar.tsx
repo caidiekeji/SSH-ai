@@ -1,8 +1,10 @@
 // AI conversation panel: chat-style layout with its own composer (same width
-// as the panel), question bubbles + diagnosis cards, quick error triggers.
+// as the panel). Diagnosis cards follow a strict three-block skeleton:
+// 总结 → 根因 → 解决方法 (numbered steps + command + insert). No model noise.
 
 import { useEffect, useRef } from "react";
 import { useStore } from "../store";
+import type { DiagnosisCard as Card } from "../types";
 
 export function AiSidebar() {
   const cards = useStore((s) => s.cards);
@@ -74,91 +76,7 @@ export function AiSidebar() {
         )}
 
         {cards.map((c) => (
-          <div className="chat-msg" key={c.id}>
-            {c.question && <div className="bubble user">{c.question}</div>}
-            <div className={`card ${!c.result?.structured && c.result && !c.error ? "degraded" : ""}`}>
-              <div className="card-head">
-                <span className="ai-gem tiny" />
-                {c.streaming ? (
-                  <span className="model-tag streaming">✦ 正在分析（首 token 可能需要数秒）…</span>
-                ) : c.result?.structured && c.result.diagnosis ? (
-                  <>
-                    <span className="summary">{c.result.diagnosis.summary}</span>
-                    <span className={`confidence confidence-${c.result.diagnosis.confidence}`}>
-                      {c.result.diagnosis.confidence === "high"
-                        ? "高置信"
-                        : c.result.diagnosis.confidence === "medium"
-                          ? "中置信"
-                          : "低置信"}
-                    </span>
-                  </>
-                ) : c.error ? (
-                  <span className="error-text">{c.error}</span>
-                ) : (
-                  <span className="model-tag">未返回结构化结果</span>
-                )}
-                {!c.streaming && (
-                  <button className="icon-op close" title="关闭" onClick={() => useStore.getState().closeCard(c.id)}>
-                    ×
-                  </button>
-                )}
-              </div>
-
-              {c.streaming && <pre className="raw-text stream">{c.streamingText || "等待模型响应…"}</pre>}
-
-              {!c.streaming && !c.error && c.result?.structured && (
-                <>
-                  {c.result.diagnosis?.root_cause && <div className="root-cause">根因：{c.result.diagnosis.root_cause}</div>}
-                  {(c.result.steps ?? []).map((step, i) => (
-                    <StepRow
-                      key={i}
-                      index={i + 1}
-                      description={step.description}
-                      command={step.command}
-                      hint={step.risk_hint}
-                      onInsert={() => useStore.getState().requestInsert(c.id, step.command, step.risk_hint)}
-                    />
-                  ))}
-                  {c.result.alternative && <div className="root-cause">补充：{c.result.alternative}</div>}
-                  <div className="card-foot">
-                    <span className="model-tag">
-                      {c.provider} · {c.model}
-                    </span>
-                    <span className="flex1" />
-                    <button
-                      className="small"
-                      onClick={() =>
-                        navigator.clipboard.writeText(c.result?.raw ?? JSON.stringify(c.result, null, 2))
-                      }
-                    >
-                      复制全部
-                    </button>
-                    <button className="small" onClick={() => useStore.getState().retryDiagnosis()} title="可在顶部切换 Provider 后重试">
-                      重新生成
-                    </button>
-                  </div>
-                </>
-              )}
-
-              {!c.streaming && !c.error && c.result && !c.result.structured && (
-                <>
-                  <pre className="raw-text">{c.result.raw}</pre>
-                  <div className="degraded-note">
-                    当前模型未返回结构化结果，"插入输入行"已禁用。建议在 Provider 配置中切换支持结构化输出的模型。
-                  </div>
-                  <div className="card-foot">
-                    <span className="model-tag">
-                      {c.provider} · {c.model}
-                    </span>
-                    <span className="flex1" />
-                    <button className="small" onClick={() => navigator.clipboard.writeText(c.result?.raw ?? "")}>
-                      复制
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
+          <ChatMessage key={c.id} card={c} />
         ))}
       </div>
 
@@ -200,6 +118,151 @@ export function AiSidebar() {
   );
 }
 
+function ChatMessage({ card }: { card: Card }) {
+  if (card.streaming) {
+    return (
+      <div className="chat-msg">
+        {card.question && <div className="bubble user">{card.question}</div>}
+        <div className="dcard streaming">
+          <div className="dcard-title analyzing">
+            <span className="ai-gem tiny" /> 正在分析<span className="dots">…</span>
+          </div>
+          <pre className="raw-text stream">{card.streamingText || "等待模型响应…"}</pre>
+        </div>
+      </div>
+    );
+  }
+  if (card.error) {
+    return (
+      <div className="chat-msg">
+        {card.question && <div className="bubble user">{card.question}</div>}
+        <div className="dcard error">
+          <div className="dcard-title">⚠ 分析失败</div>
+          <div className="fail-body">{card.error}</div>
+          <div className="dcard-foot">
+            <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}>↻ 重试</button>
+            <button className="mini" onClick={() => useStore.getState().closeCard(card.id)}>关闭</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  const r = card.result;
+  if (!r) return null;
+
+  // Degraded (non-structured) reply: plain text, copy only.
+  if (!r.structured) {
+    return (
+      <div className="chat-msg">
+        {card.question && <div className="bubble user">{card.question}</div>}
+        <div className="dcard degraded">
+          <div className="dcard-title">回复原文</div>
+          <pre className="raw-text">{r.raw}</pre>
+          <div className="note-warn">模型未返回结构化结果，无法提供"插入"。建议在设置中更换模型。</div>
+          <div className="dcard-foot">
+            <button className="mini" onClick={() => navigator.clipboard.writeText(r.raw ?? "")}>⧉ 复制</button>
+            <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}>↻ 重新生成</button>
+            <button className="mini close" onClick={() => useStore.getState().closeCard(card.id)}>关闭</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const d = r.diagnosis;
+  const steps = r.steps ?? [];
+  return (
+    <div className="chat-msg">
+      {card.question && <div className="bubble user">{card.question}</div>}
+      <div className="dcard">
+        {/* ① 问题总结 */}
+        <div className="dcard-block head">
+          <span className="dcard-label">问题</span>
+          <div className="dcard-title-row">
+            <span className="dcard-title">{d?.summary || "诊断完成"}</span>
+            {d?.confidence && (
+              <span className={`confidence confidence-${d.confidence}`}>
+                {d.confidence === "high" ? "高置信" : d.confidence === "medium" ? "中置信" : "低置信"}
+              </span>
+            )}
+          </div>
+          {d?.root_cause && <div className="dcard-cause">{d.root_cause}</div>}
+        </div>
+
+        {/* ② 解决方法 */}
+        {steps.length > 0 && (
+          <div className="dcard-block">
+            <span className="dcard-label">解决方法</span>
+            <div className="dsteps">
+              {steps.map((s, i) => (
+                <StepRow
+                  key={i}
+                  index={i + 1}
+                  description={s.description}
+                  command={s.command}
+                  hint={s.risk_hint}
+                  onInsert={() => useStore.getState().requestInsert(card.id, s.command, s.risk_hint)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ③ 补充说明 */}
+        {r.alternative && (
+          <div className="dcard-block alt">
+            <span className="dcard-label">补充</span>
+            <div className="dcard-cause">{r.alternative}</div>
+          </div>
+        )}
+
+        <div className="dcard-foot">
+          <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}>↻ 重新生成</button>
+          <button
+            className="mini"
+            onClick={() => navigator.clipboard.writeText(r.raw ?? JSON.stringify(r, null, 2))}
+          >
+            ⧉ 复制全部
+          </button>
+          <span className="flex1" />
+          <button className="mini close" onClick={() => useStore.getState().closeCard(card.id)}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StepRow({
+  index,
+  description,
+  command,
+  hint,
+  onInsert,
+}: {
+  index: number;
+  description: string;
+  command: string;
+  hint: string;
+  onInsert: () => void;
+}) {
+  const dotColor = hint === "destructive" ? "risk-red" : hint === "write" ? "risk-yellow" : "risk-green";
+  const riskLabel = hint === "destructive" ? "高危" : hint === "write" ? "需确认" : "安全";
+  return (
+    <div className="dstep">
+      <div className="dstep-top">
+        <span className={`risk-dot ${dotColor}`} title={`AI 建议: ${hint}（实际以本地分级为准）`} />
+        <span className="dstep-no">{index}.</span>
+        <span className="dstep-desc">{description}</span>
+        <span className={`dstep-risk ${dotColor.replace("risk-", "")}`}>{riskLabel}</span>
+        <button className="ins" onClick={onInsert} title="写入终端输入行，由你按 Enter 执行">
+          插入
+        </button>
+      </div>
+      <code className="dstep-cmd">{command}</code>
+    </div>
+  );
+}
+
 // Compact in-panel model switcher: shows ONLY the model name, no vendor
 // prefix or "custom" noise. Lives in the chat header (fused layout).
 function ModelSwitcher() {
@@ -222,37 +285,5 @@ function ModelSwitcher() {
         </option>
       ))}
     </select>
-  );
-}
-
-function StepRow({
-  index,
-  description,
-  command,
-  hint,
-  onInsert,
-}: {
-  index: number;
-  description: string;
-  command: string;
-  hint: string;
-  onInsert: () => void;
-}) {
-  const dotColor = hint === "destructive" ? "risk-red" : hint === "write" ? "risk-yellow" : "risk-green";
-  return (
-    <div className="step">
-      <div className="step-head">
-        <span className={`risk-dot ${dotColor}`} title={`AI 建议: ${hint}（本地分级以实际判定为准）`} />
-        <span className="step-desc">
-          {index}. {description}
-        </span>
-        <button className="ins" onClick={onInsert}>
-          插入输入行
-        </button>
-      </div>
-      <div className="step-cmd">
-        <code>{command}</code>
-      </div>
-    </div>
   );
 }
