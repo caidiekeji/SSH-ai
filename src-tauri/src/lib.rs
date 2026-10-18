@@ -24,6 +24,11 @@ use tauri::{
 
 pub fn run() {
     tauri::Builder::default()
+        // Single instance: launching the exe again focuses the existing window
+        // instead of spawning a second process (which would add a second tray icon).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app);
+        }))
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = handle.path().app_data_dir()?;

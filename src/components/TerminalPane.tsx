@@ -154,16 +154,16 @@ export function TerminalPane() {
             </div>
           </div>
         )}
-        {/* Floating diagnose button, bottom-right of the terminal output */}
+        {/* Floating diagnose button: docks as icon-only circle, expands on hover */}
         {connStatus === "connected" && (
           <button
-            className="term-fab"
+            className={`term-fab ${diagState === "T1_ANALYZING" ? "busy" : ""}`}
             disabled={diagState === "T1_ANALYZING"}
             onClick={() => startDiagnosis("")}
             title="一键诊断：发送最近命令的输出块 + 系统上下文给 AI 分析"
           >
             <Icon name="sparkles" size={15} className={diagState === "T1_ANALYZING" ? "spin" : ""} />
-            {diagState === "T1_ANALYZING" ? "分析中" : "一键诊断"}
+            <span className="fab-label">{diagState === "T1_ANALYZING" ? "分析中" : "一键诊断"}</span>
           </button>
         )}
       </div>

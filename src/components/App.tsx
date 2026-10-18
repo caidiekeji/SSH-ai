@@ -68,19 +68,21 @@ export function App() {
       </div>
 
       <div className={`inputbar ${aiMode ? "ai-mode" : ""}`}>
-        <span className="ai-badge"># AI</span>
+        <span className="mode-ico" title={aiMode ? "AI 模式" : "命令模式"}>
+          <Icon name={aiMode ? "sparkles" : "terminal"} size={14} />
+        </span>
         <input
           ref={inputRef}
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
-          placeholder="输入命令按 Enter 执行；以 # 开头则发给 AI 分析当前终端"
+          placeholder={aiMode ? "向 AI 描述问题，Enter 发送分析当前终端" : "输入命令，Enter 直接执行（# 开头发给 AI）"}
           spellCheck={false}
           onKeyDown={(e) => {
             if (e.key === "Enter") sendInput();
           }}
         />
-        <button className={aiMode ? "primary" : ""} onClick={sendInput} disabled={!inputText.trim()} title={aiMode ? "发送给 AI (Enter)" : "执行命令 (Enter)"}>
-          {aiMode ? <Icon name="sparkles" size={13} /> : <Icon name="terminal" size={13} />} {aiMode ? "AI 分析" : "执行"}
+        <button className="send-btn" onClick={sendInput} disabled={!inputText.trim()} title={aiMode ? "发送给 AI (Enter)" : "执行命令 (Enter)"}>
+          <Icon name={aiMode ? "sparkles" : "arrowUpRight"} size={15} />
         </button>
       </div>
 
