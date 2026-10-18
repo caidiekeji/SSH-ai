@@ -506,6 +506,11 @@ export const useStore = create<Store>((set, get) => ({
   agentLoop: async () => {
     const MAX_STEPS = 12;
     let verifyAsked = false; // 是否已要求 AI 补验证（防无限验证循环）
+    // 审计：任务结束时落盘（data_dir/agent_logs/），失败静默。
+    const audit = (s: string) => {
+      const st = get();
+      void ipc.saveAgentLog(st.agentGoal, s, st.agentSteps);
+    };
     for (let i = 1; i <= MAX_STEPS; i++) {
       const st = get();
       if (st.agentStatus !== "running" || !st.sessionId) return;
@@ -536,10 +541,12 @@ export const useStore = create<Store>((set, get) => ({
           continue;
         }
         set({ agentStatus: "done" });
+        audit("done");
         return;
       }
       if (step.action === "giveup") {
         set({ agentStatus: "failed", agentError: step.reason || step.summary || "Agent 无法完成该目标" });
+        audit("failed");
         return;
       }
       const command = step.command || "";
@@ -580,6 +587,7 @@ export const useStore = create<Store>((set, get) => ({
           agentStatus: "failed",
           agentError: `第 ${i} 步执行失败: ${String(e)}`,
         }));
+        audit("failed");
         return;
       }
       if (get().agentStatus !== "running") return;
@@ -598,11 +606,14 @@ export const useStore = create<Store>((set, get) => ({
       }));
     }
     set({ agentStatus: "failed", agentError: `已达最大步数（${MAX_STEPS} 步），任务未完成，可检查后重试` });
+    audit("failed");
   },
   stopAgent: () => {
     const resolve = get()._agentResolve;
     set({ agentStatus: "stopped", agentApproval: null, _agentResolve: null });
     resolve?.(false);
+    const st = get();
+    if (st.agentSteps.length > 0) void ipc.saveAgentLog(st.agentGoal, "stopped", st.agentSteps);
   },
   resolveAgent: (ok) => {
     const resolve = get()._agentResolve;

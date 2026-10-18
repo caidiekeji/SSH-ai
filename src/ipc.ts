@@ -105,6 +105,8 @@ export const ipc = {
     }>("agent_step", { sessionId, goal, steps, requireVerification }),
   getAgentConfig: () => invoke<{ autoGreen: boolean }>("get_agent_config"),
   setAgentConfig: (autoGreen: boolean) => invoke<void>("set_agent_config", { autoGreen }),
+  saveAgentLog: (goal: string, status: string, steps: unknown) =>
+    invoke<string>("save_agent_log", { goal, status, steps }).catch(() => ""),
 
   // ---- MCP server (external IDE integration) ----
   getMcpConfig: () => invoke<{ enabled: boolean; port: number; token: string }>("get_mcp_config"),

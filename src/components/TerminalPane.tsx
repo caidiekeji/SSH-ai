@@ -78,6 +78,8 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
   const [searchText, setSearchText] = useState("");
   const searchRef = useRef<SearchAddon | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // 右键菜单：选中终端文本后出现，交给 AI 排查/解释。
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; text: string } | null>(null);
 
   // Terminal lifecycle: create once per session id.
   useEffect(() => {
@@ -127,6 +129,17 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
       }
     };
     hostRef.current.addEventListener("wheel", onWheel, { passive: false });
+    // 右键菜单：选中文本时拦截默认菜单，弹"交给 AI"操作。
+    const onCtx = (e: MouseEvent) => {
+      const sel = term.getSelection();
+      if (!sel || !sel.trim()) return;
+      e.preventDefault();
+      const rect = hostRef.current!.getBoundingClientRect();
+      setCtxMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, text: sel.slice(0, 3000) });
+    };
+    hostRef.current.addEventListener("contextmenu", onCtx);
+    const onSel = () => setCtxMenu(null);
+    term.onSelectionChange(onSel);
     if (activeRef.current) {
       try {
         fit.fit();
@@ -188,6 +201,7 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
       termRegistry.delete(sessionId);
       searchRef.current = null;
       hostRef.current?.removeEventListener("wheel", onWheel);
+      hostRef.current?.removeEventListener("contextmenu", onCtx);
       termRef.current = null;
       fitRef.current = null;
     };
@@ -214,6 +228,27 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
   return (
     <div className="term-host-inner" style={{ display: active ? "flex" : "none" }}>
       <div ref={hostRef} className="term-host" />
+      {ctxMenu && (
+        <div className="term-ctx" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+          <button
+            onClick={() => {
+              useStore.getState().startDiagnosis(ctxMenu.text);
+              setCtxMenu(null);
+            }}
+          >
+            排查此输出（诊断模式）
+          </button>
+          <button
+            onClick={() => {
+              useStore.setState({ composerMode: "chat" });
+              void useStore.getState().sendChat(`解释这段终端输出：\n${ctxMenu.text.slice(0, 1500)}`);
+              setCtxMenu(null);
+            }}
+          >
+            AI 解释（对话模式）
+          </button>
+        </div>
+      )}
       {showSearch && (
         <div className="term-search">
           <input

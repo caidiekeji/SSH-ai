@@ -220,6 +220,31 @@ fn tools_json() -> Value {
             "properties": { "session_id": { "type": "integer" } },
             "required": ["session_id"]
         }
+    },
+    {
+        "name": "upload_file",
+        "description": "上传数据到远端文件（data_base64 为文件内容的 Base64 编码，≤60MB），将覆盖目标文件",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "integer" },
+                "remote_path": { "type": "string" },
+                "data_base64": { "type": "string" }
+            },
+            "required": ["session_id", "remote_path", "data_base64"]
+        }
+    },
+    {
+        "name": "download_file",
+        "description": "读取远端文件，返回 Base64 编码的内容（≤1MB）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "integer" },
+                "remote_path": { "type": "string" }
+            },
+            "required": ["session_id", "remote_path"]
+        }
     }
     ])
 }
@@ -325,6 +350,25 @@ async fn run_tool(app: &tauri::AppHandle, name: &str, args: &Value) -> Result<St
             let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;
             crate::commands::ssh_disconnect(st, session_id).await?;
             Ok("已断开".to_string())
+        }
+        "upload_file" => {
+            use base64::Engine;
+            let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;
+            let remote_path = args.get("remote_path").and_then(|v| v.as_str()).ok_or("缺少 remote_path")?.to_string();
+            let data_b64 = args.get("data_base64").and_then(|v| v.as_str()).ok_or("缺少 data_base64")?.to_string();
+            crate::commands::sftp_upload_data(st, session_id, remote_path, data_b64).await
+        }
+        "download_file" => {
+            use base64::Engine;
+            const MAX_DL: usize = 1024 * 1024;
+            let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;
+            let remote_path = args.get("remote_path").and_then(|v| v.as_str()).ok_or("缺少 remote_path")?.to_string();
+            let sftp = crate::commands::open_sftp(&st, session_id).await?;
+            let data = sftp.read(&remote_path).await.map_err(|e| format!("读取失败: {e}"))?;
+            if data.len() > MAX_DL {
+                return Err(format!("文件 {} 字节，超过 1MB 限制；请用 exec_command 分段读取", data.len()));
+            }
+            Ok(base64::engine::general_purpose::STANDARD.encode(data))
         }
         other => Err(format!("未知工具: {other}")),
     }

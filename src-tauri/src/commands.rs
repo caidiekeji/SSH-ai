@@ -686,7 +686,7 @@ pub fn delete_prompt(state: State<'_, AppState>, id: String) -> Result<(), Strin
 // USER-initiated file transfer only — the AI path never touches these.
 // ---------------------------------------------------------------------------
 
-async fn open_sftp(state: &State<'_, AppState>, session_id: u64) -> Result<russh_sftp::client::SftpSession, String> {
+pub(crate) async fn open_sftp(state: &State<'_, AppState>, session_id: u64) -> Result<russh_sftp::client::SftpSession, String> {
     let handle_cell = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions
@@ -771,6 +771,43 @@ pub async fn sftp_upload_data(
         .await
         .map_err(|e| format!("写入失败: {e}"))?;
     Ok(format!("已上传 {} 字节 → {}", data.len(), remote_path))
+}
+
+// ---------------------------------------------------------------------------
+// Agent audit log: persist every agent task (goal/steps/status) to
+// data_dir/agent_logs/ so ops history is reviewable after the fact.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn save_agent_log(
+    state: State<'_, AppState>,
+    goal: String,
+    status: String,
+    steps: serde_json::Value,
+) -> Result<String, String> {
+    let dir = state.data_dir.join("agent_logs");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let ts = chrono_like_timestamp();
+    let file = dir.join(format!("agent-{ts}.json"));
+    let payload = serde_json::json!({
+        "finishedAt": ts,
+        "status": status,
+        "goal": goal,
+        "steps": steps,
+    });
+    std::fs::write(&file, serde_json::to_string_pretty(&payload).unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    Ok(file.display().to_string())
+}
+
+/// Millisecond timestamp filename (no chrono dep).
+fn chrono_like_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{ms}")
 }
 
 #[derive(serde::Serialize)]

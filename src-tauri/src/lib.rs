@@ -124,6 +124,7 @@ pub fn run() {
             commands::set_diagnosis_depth,
             commands::get_agent_config,
             commands::set_agent_config,
+            commands::save_agent_log,
             commands::get_mcp_config,
             commands::set_mcp_config,
             commands::delete_api_key,

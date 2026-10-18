@@ -421,12 +421,21 @@ function AgentCard() {
             </button>
           )}
           {(status === "done" || status === "failed" || status === "stopped") && (
-            <button
-              className="mini close"
-              onClick={() => useStore.setState({ agentStatus: "idle", agentSteps: [], agentGoal: "", agentError: "", agentApproval: null })}
-            >
-              关闭
-            </button>
+            <>
+              <button
+                className="mini"
+                title="用 AI 重新分析当前终端最近输出，确认任务效果"
+                onClick={() => useStore.getState().startDiagnosis("")}
+              >
+                <Icon name="sparkles" size={11} /> 诊断复查
+              </button>
+              <button
+                className="mini close"
+                onClick={() => useStore.setState({ agentStatus: "idle", agentSteps: [], agentGoal: "", agentError: "", agentApproval: null })}
+              >
+                关闭
+              </button>
+            </>
           )}
         </div>
         <div className="agent-goal">{goal}</div>

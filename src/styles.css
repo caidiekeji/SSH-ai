@@ -1854,3 +1854,67 @@ button.primary, button:not([class]) { transition: filter 150ms ease, border-colo
 /* ---- 全局隐藏滚动条（保留滚动能力） ---- */
 * { scrollbar-width: none; }
 ::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+/* ---- terminal search bar (Ctrl+F) ---- */
+.term-host-inner { position: relative; }
+.term-search {
+  position: absolute;
+  top: 6px;
+  right: 14px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.25));
+}
+.term-search input {
+  width: 170px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--mono);
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  color: var(--text);
+}
+.term-search .icon-op { padding: 3px 5px; }
+
+/* ---- ssh session groups ---- */
+.ssh-group { margin-bottom: 12px; }
+.ssh-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  padding: 6px 2px;
+  border-bottom: 1px dashed var(--border-soft);
+  margin-bottom: 6px;
+}
+
+/* ---- terminal selection context menu (AI actions) ---- */
+.term-ctx {
+  position: absolute;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 5px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+.term-ctx button {
+  text-align: left;
+  padding: 7px 11px;
+  font-size: 12px;
+  border-radius: 7px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+}
+.term-ctx button:hover { background: var(--accent-soft); color: var(--accent); }
