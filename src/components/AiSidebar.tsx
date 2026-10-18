@@ -194,30 +194,34 @@ function Composer() {
           <button
             className={`mode-chip ${mode === "cmd" ? "active" : ""}`}
             onClick={() => setMode("cmd")}
-            title="直接把文本作为命令发送到终端执行"
+            title="命令：直接把文本发送到终端执行"
+            aria-label="命令模式"
           >
-            <Icon name="terminal" size={12} /> 命令
+            <Icon name="terminal" size={14} />
           </button>
           <button
             className={`mode-chip ${mode === "diag" ? "active" : ""}`}
             onClick={() => setMode("diag")}
-            title="结合当前终端输出进行 AI 诊断"
+            title="诊断：结合当前终端输出进行 AI 分析"
+            aria-label="诊断模式"
           >
-            <Icon name="sparkles" size={12} /> 诊断
+            <Icon name="sparkles" size={14} />
           </button>
           <button
             className={`mode-chip ${mode === "agent" ? "active" : ""}`}
             onClick={() => setMode("agent")}
-            title="AI 自动化运维：规划→分级→执行→观察 循环"
+            title="Agent：自动规划并逐步执行运维任务"
+            aria-label="Agent 模式"
           >
-            <Icon name="zap" size={12} /> Agent
+            <Icon name="zap" size={14} />
           </button>
           <button
             className={`mode-chip ${mode === "chat" ? "active" : ""}`}
             onClick={() => setMode("chat")}
-            title="与 AI 多轮自由对话（不读取终端输出）"
+            title="对话：与 AI 多轮自由对话（不读取终端）"
+            aria-label="对话模式"
           >
-            <Icon name="pencil" size={12} /> 对话
+            <Icon name="pencil" size={14} />
           </button>
         </div>
         <button className="composer-send" onClick={send} disabled={!text.trim() || (mode === "chat" && chatBusy)}>
@@ -273,8 +277,8 @@ function ChatMessage({ card }: { card: Card }) {
           <pre className="raw-text">{r.raw}</pre>
           <div className="note-warn">模型未返回结构化结果，无法提供"插入"。建议在设置中更换模型。</div>
           <div className="dcard-foot">
-            <button className="mini" onClick={() => navigator.clipboard.writeText(r.raw ?? "")}><Icon name="copy" size={11} /> 复制</button>
-            <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}><Icon name="refresh" size={11} /> 重新生成</button>
+            <button className="mini icon-only" title="复制" aria-label="复制" onClick={() => navigator.clipboard.writeText(r.raw ?? "")}><Icon name="copy" size={12} /></button>
+            <button className="mini icon-only" title="重新生成" aria-label="重新生成" onClick={() => useStore.getState().retryDiagnosis()}><Icon name="refresh" size={12} /></button>
             <button className="mini close" onClick={() => useStore.getState().closeCard(card.id)}>关闭</button>
           </div>
         </div>
@@ -330,12 +334,14 @@ function ChatMessage({ card }: { card: Card }) {
         )}
 
         <div className="dcard-foot">
-          <button className="mini" onClick={() => useStore.getState().retryDiagnosis()}><Icon name="refresh" size={11} /> 重新生成</button>
+          <button className="mini icon-only" title="重新生成" aria-label="重新生成" onClick={() => useStore.getState().retryDiagnosis()}><Icon name="refresh" size={12} /></button>
           <button
-            className="mini"
+            className="mini icon-only"
+            title="复制全部"
+            aria-label="复制全部"
             onClick={() => navigator.clipboard.writeText(r.raw ?? JSON.stringify(r, null, 2))}
           >
-            <Icon name="copy" size={11} /> 复制全部
+            <Icon name="copy" size={12} />
           </button>
           <span className="flex1" />
           {card.blocksSent != null && (

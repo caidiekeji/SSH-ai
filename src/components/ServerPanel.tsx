@@ -31,6 +31,7 @@ export function ServerPanel() {
   const runOp = useStore((s) => s.runOp);
 
   const [showAdd, setShowAdd] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
   const [form, setForm] = useState<HostFormValues>(emptyHostForm);
   const [err, setErr] = useState("");
   const { keyBusy, onKeyFile } = useKeyUpload(setForm, setErr);
@@ -241,28 +242,14 @@ export function ServerPanel() {
               <Stat icon="gauge" label="负载" pct={loadPct} text={`${serverInfo.load1.toFixed(2)} / ${serverInfo.cores} 核`} />
               <Stat icon="hardDrive" label="磁盘 /" pct={diskPct} text={`${fmtSize(serverInfo.diskUsed)} / ${fmtSize(serverInfo.diskTotal)}`} />
               <div className="io-grid">
-                <div className="io-item" title="所有网卡合计（不含本机回环）">
-                  <Icon name="arrowDown" size={11} className="ico-down" />
-                  {fmtSize(serverInfo.netRxRate)}/s
-                  <Icon name="arrowUp" size={11} className="ico-up" />
-                  {fmtSize(serverInfo.netTxRate)}/s
-                </div>
-                <div className="io-item" title="根分区的每秒读取/写入（/proc/diskstats）">
-                  <span className="io-label">读</span>
-                  {fmtSize(serverInfo.diskReadRate)}/s
-                  <span className="io-label">写</span>
-                  {fmtSize(serverInfo.diskWriteRate)}/s
-                </div>
+                <IOMetric icon="arrowDown" iconCls="ico-down" label="下行" value={`${fmtSize(serverInfo.netRxRate)}/s`} title="所有网卡合计下载速率（不含本机回环）" />
+                <IOMetric icon="arrowUp" iconCls="ico-up" label="上行" value={`${fmtSize(serverInfo.netTxRate)}/s`} title="所有网卡合计上传速率（不含本机回环）" />
+                <IOMetric label="磁盘读" value={`${fmtSize(serverInfo.diskReadRate)}/s`} title="根分区每秒读取（/proc/diskstats）" />
+                <IOMetric label="磁盘写" value={`${fmtSize(serverInfo.diskWriteRate)}/s`} title="根分区每秒写入（/proc/diskstats）" />
                 {serverInfo.memAvailable > 0 && (
-                  <div className="io-item" title="当前可供新进程使用的物理内存">
-                    <span className="io-label">可用内存</span>
-                    {fmtSize(serverInfo.memAvailable)}
-                  </div>
+                  <IOMetric label="可用内存" value={fmtSize(serverInfo.memAvailable)} title="当前可供新进程使用的物理内存" />
                 )}
-                <div className="io-item" title="5 分钟平均负载">
-                  <span className="io-label">5 分钟负载</span>
-                  {serverInfo.load5.toFixed(2)}
-                </div>
+                <IOMetric label="5m负载" value={serverInfo.load5.toFixed(2)} title="5 分钟平均负载" />
               </div>
               <div className="uptime">
                 <Icon name="clock" size={12} /> 已运行 {serverInfo.uptime}
@@ -271,50 +258,73 @@ export function ServerPanel() {
           )}
           {!serverInfo && !serverError && <div className="dim-note">读取中…</div>}
 
-          {/* ---- file manager ---- */}
-          <h3>文件</h3>
-          <div className="file-path">
-            <input
-              value={pathInput}
-              onChange={(e) => setPathInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && listDir(pathInput || "~")}
-              spellCheck={false}
-            />
-            <button className="small" title="上级目录" onClick={upDir}><Icon name="chevronUp" size={12} /></button>
-            <button className="small" title="刷新" onClick={() => listDir(files.path)}><Icon name="refresh" size={12} /></button>
-            <button className="small" title="新建文件夹" onClick={mkdir}><Icon name="plus" size={12} /></button>
-          </div>
-          {fileError && <div className="error-text small-err">{fileError}</div>}
-          <div className="file-list">
-            {files.entries.length === 0 && <div className="dim-note">空目录</div>}
-            {files.entries.map((e) => (
-              <div key={e.name} className={`file-row ${e.dir ? "is-dir" : ""}`}>
-                <span className="file-icon" onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
-                  <Icon name={e.dir ? "folder" : "file"} size={14} className={e.dir ? "ico-dir" : "ico-file"} />
-                </span>
-                <span className="file-name" title={`${e.name} · ${e.mtime}`} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
-                  {e.name}
-                  {!e.dir && <em>{fmtSize(e.size)}</em>}
-                </span>
-                <span className="file-ops">
-                  <button className="icon-op" title={e.dir ? "打开" : "预览"} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
-                    <Icon name={e.dir ? "arrowUpRight" : "eye"} size={13} />
-                  </button>
-                  {e.dir && (
-                    <button className="icon-op" title="在终端打开（cd）" onClick={() => ipc.terminalWrite(sessionId!, new TextEncoder().encode(`cd ${q(e.name)} && ls -A\n`))}>
-                      <Icon name="terminal" size={13} />
-                    </button>
-                  )}
-                  {e.name.endsWith(".sh") && (
-                    <button className="icon-op" title="执行脚本" onClick={() => execEntry(e)}><Icon name="play" size={13} /></button>
-                  )}
-                  <button className="icon-op" title="重命名" onClick={() => doRename(e)}><Icon name="pencil" size={13} /></button>
-                  <button className="icon-op danger" title="删除" onClick={() => doDelete(e)}><Icon name="trash" size={13} /></button>
-                </span>
-              </div>
-            ))}
-          </div>
+          {/* ---- file manager launcher (content opens in a modal) ---- */}
+          <button
+            className="small fm-open"
+            title="浏览与管理远端文件"
+            onClick={() => {
+              setFilesOpen(true);
+              listDir(useStore.getState().files.path || "~");
+            }}
+          >
+            <Icon name="folder" size={13} /> 文件管理
+          </button>
         </>
+      )}
+
+      {/* ---- file manager modal ---- */}
+      {filesOpen && (
+        <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && setFilesOpen(false)}>
+          <div className="modal modal-file">
+            <button className="modal-x" title="关闭 (Esc)" onClick={() => setFilesOpen(false)}>
+              <Icon name="x" size={16} />
+            </button>
+            <h2 className="confirm-title">
+              <Icon name="folder" size={16} className="ico-accent" /> 文件管理
+            </h2>
+            <div className="file-path">
+              <input
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && listDir(pathInput || "~")}
+                spellCheck={false}
+              />
+              <button className="small" title="上级目录" onClick={upDir}><Icon name="chevronUp" size={12} /></button>
+              <button className="small" title="刷新" onClick={() => listDir(files.path)}><Icon name="refresh" size={12} /></button>
+              <button className="small" title="新建文件夹" onClick={mkdir}><Icon name="plus" size={12} /></button>
+            </div>
+            {fileError && <div className="error-text small-err">{fileError}</div>}
+            <div className="file-list fm-list">
+              {files.entries.length === 0 && <div className="dim-note">空目录</div>}
+              {files.entries.map((e) => (
+                <div key={e.name} className={`file-row ${e.dir ? "is-dir" : ""}`}>
+                  <span className="file-icon" onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
+                    <Icon name={e.dir ? "folder" : "file"} size={14} className={e.dir ? "ico-dir" : "ico-file"} />
+                  </span>
+                  <span className="file-name" title={`${e.name} · ${e.mtime}`} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
+                    {e.name}
+                    {!e.dir && <em>{fmtSize(e.size)}</em>}
+                  </span>
+                  <span className="file-ops">
+                    <button className="icon-op" title={e.dir ? "打开" : "预览"} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
+                      <Icon name={e.dir ? "arrowUpRight" : "eye"} size={13} />
+                    </button>
+                    {e.dir && (
+                      <button className="icon-op" title="在终端打开（cd）" onClick={() => ipc.terminalWrite(sessionId!, new TextEncoder().encode(`cd ${q(e.name)} && ls -A\n`))}>
+                        <Icon name="terminal" size={13} />
+                      </button>
+                    )}
+                    {e.name.endsWith(".sh") && (
+                      <button className="icon-op" title="执行脚本" onClick={() => execEntry(e)}><Icon name="play" size={13} /></button>
+                    )}
+                    <button className="icon-op" title="重命名" onClick={() => doRename(e)}><Icon name="pencil" size={13} /></button>
+                    <button className="icon-op danger" title="删除" onClick={() => doDelete(e)}><Icon name="trash" size={13} /></button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ---- add host modal (unchanged behavior) ---- */}
@@ -388,6 +398,32 @@ export function ServerPanel() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// One IO metric cell: label left, value right — single metric per cell so
+// narrow panels never truncate values.
+function IOMetric({
+  label,
+  value,
+  title,
+  icon,
+  iconCls,
+}: {
+  label: string;
+  value: string;
+  title: string;
+  icon?: string;
+  iconCls?: string;
+}) {
+  return (
+    <div className="io-item" title={title}>
+      <span className="io-k">
+        {icon && <Icon name={icon} size={11} className={iconCls} />}
+        {label}
+      </span>
+      <span className="io-v">{value}</span>
     </div>
   );
 }
