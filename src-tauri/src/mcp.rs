@@ -292,7 +292,7 @@ async fn run_tool(app: &tauri::AppHandle, name: &str, args: &Value) -> Result<St
         "exec_command" => {
             let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;
             let command = args.get("command").and_then(|v| v.as_str()).ok_or("缺少 command")?.to_string();
-            crate::commands::exec_oneshot(st, session_id, command).await
+            crate::commands::exec_oneshot(st, session_id, command, None).await
         }
         "screen_tail" => {
             let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;

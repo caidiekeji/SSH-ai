@@ -867,8 +867,8 @@ pub async fn exec_oneshot(
     state: State<'_, AppState>,
     session_id: u64,
     command: String,
-    /// Optional per-call timeout (5..=300 s). Default 15 s for dashboard
-    /// probes; the Agent loop passes 60 s for real ops commands.
+    // Optional per-call timeout (5..=300 s). Default 15 s for dashboard
+    // probes; the Agent loop passes 60 s for real ops commands.
     timeout_secs: Option<u64>,
 ) -> Result<String, String> {
     use russh::ChannelMsg;
