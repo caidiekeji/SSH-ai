@@ -739,24 +739,17 @@ pub async fn sftp_download(
         .await
         .map_err(|e| format!("创建本地文件失败: {e}"))?;
     use tokio::io::AsyncWriteExt;
-    let mut offset: u64 = 0;
-    loop {
-        let data = sftp
-            .read(&remote_path, offset, 32768)
-            .await
-            .map_err(|e| format!("读取失败: {e}"))?;
-        let n = data.len();
-        if n == 0 {
-            break;
-        }
-        out.write_all(&data).await.map_err(|e| e.to_string())?;
-        offset += n as u64;
-        if n < 32768 {
-            break;
-        }
-    }
+    let data = sftp
+        .read(&remote_path)
+        .await
+        .map_err(|e| format!("读取失败: {e}"))?;
+    out.write_all(&data).await.map_err(|e| e.to_string())?;
     out.flush().await.map_err(|e| e.to_string())?;
-    Ok(format!("已下载 {name}（{offset} 字节）→ {}", local_path.display()))
+    Ok(format!(
+        "已下载 {name}（{} 字节）→ {}",
+        data.len(),
+        local_path.display()
+    ))
 }
 
 #[tauri::command]
@@ -774,14 +767,10 @@ pub async fn sftp_upload_data(
         .decode(data_b64.as_bytes())
         .map_err(|e| format!("数据解码失败: {e}"))?;
     let sftp = open_sftp(&state, session_id).await?;
-    let mut offset: u64 = 0;
-    for chunk in data.chunks(32768) {
-        sftp.write(&remote_path, offset, chunk)
-            .await
-            .map_err(|e| format!("写入失败: {e}"))?;
-        offset += chunk.len() as u64;
-    }
-    Ok(format!("已上传 {offset} 字节 → {remote_path}"))
+    sftp.write(&remote_path, &data)
+        .await
+        .map_err(|e| format!("写入失败: {e}"))?;
+    Ok(format!("已上传 {} 字节 → {}", data.len(), remote_path))
 }
 
 #[derive(serde::Serialize)]
