@@ -82,6 +82,10 @@ export const ipc = {
       question,
     }),
 
+  // ---- Chat mode (multi-turn, no terminal context) ----
+  aiChat: (history: { role: string; content: string }[], question: string) =>
+    invoke<string>("ai_chat", { history, question }),
+
   // ---- AI system prompt (global, optional) ----
   getSystemPrompt: () => invoke<string>("get_system_prompt"),
   setSystemPrompt: (prompt: string) => invoke<void>("set_system_prompt", { prompt }),

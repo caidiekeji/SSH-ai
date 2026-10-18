@@ -258,6 +258,59 @@ pub async fn run_diagnosis(
     Ok(parse_response(&text, false))
 }
 
+// ---------------------------------------------------------------------------
+// Chat mode (multi-turn conversation, no terminal context)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatTurn {
+    pub role: String, // "user" | "assistant"
+    pub content: String,
+}
+
+const CHAT_SYSTEM_BASE: &str = "你是服务器运维助手，与用户进行多轮对话。回答简洁、专业、实用；涉及命令时用行内代码格式给出，但绝不执行任何命令。";
+
+/// Chat system prompt: fixed base + optional user style directive (truncated).
+pub fn chat_system_prompt(custom: Option<&str>) -> String {
+    match custom {
+        Some(p) if !p.trim().is_empty() => {
+            let trimmed: String = p.trim().chars().take(1000).collect();
+            format!("{CHAT_SYSTEM_BASE}\n\n用户偏好：{trimmed}")
+        }
+        _ => CHAT_SYSTEM_BASE.to_string(),
+    }
+}
+
+/// Stream a multi-turn chat. Pure data path (HC-03): returns accumulated
+/// text only; the caller forwards chunks to the UI via events.
+pub async fn run_chat(
+    provider: &dyn LLMProvider,
+    history: &[ChatTurn],
+    question: &str,
+    custom_prompt: Option<&str>,
+    on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
+) -> Result<String, crate::provider::error::ProviderError> {
+    let mut messages = vec![ChatMessage {
+        role: "system".into(),
+        content: chat_system_prompt(custom_prompt),
+    }];
+    for t in history {
+        let role = if t.role == "assistant" { "assistant" } else { "user" };
+        messages.push(ChatMessage {
+            role: role.into(),
+            content: t.content.clone(),
+        });
+    }
+    messages.push(ChatMessage {
+        role: "user".into(),
+        content: question.into(),
+    });
+    let (text, _complete) = provider
+        .chat_stream(messages, ChatOptions::default(), on_chunk)
+        .await?;
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

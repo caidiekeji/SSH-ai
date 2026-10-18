@@ -83,6 +83,17 @@ interface Store {
   theme: ThemeName;
   setTheme: (t: ThemeName) => void;
 
+  // ---- composer (AI panel): cmd | diag | chat ----
+  composerMode: "cmd" | "diag" | "chat";
+  setComposerMode: (m: "cmd" | "diag" | "chat") => void;
+
+  // ---- chat mode (multi-turn conversation) ----
+  chatHistory: { role: "user" | "assistant"; content: string }[];
+  chatBusy: boolean;
+  sendChat: (text: string) => Promise<void>;
+  appendChatChunk: (text: string) => void;
+  clearChat: () => void;
+
   // ---- server dashboard ----
   serverInfo: ServerInfo | null;
   serverError: string;
@@ -337,6 +348,53 @@ export const useStore = create<Store>((set, get) => ({
     localStorage.setItem("theme", t);
     set({ theme: t });
   },
+
+  // ---- composer modes ----
+  composerMode: "diag",
+  setComposerMode: (composerMode) => set({ composerMode }),
+
+  // ---- chat mode ----
+  chatHistory: [],
+  chatBusy: false,
+  sendChat: async (text) => {
+    if (!text.trim() || get().chatBusy) return;
+    const history = get().chatHistory.map((m) => ({ role: m.role, content: m.content }));
+    set((s) => ({
+      chatBusy: true,
+      chatHistory: [
+        ...s.chatHistory,
+        { role: "user" as const, content: text },
+        { role: "assistant" as const, content: "" },
+      ],
+    }));
+    try {
+      const reply = await ipc.aiChat(history, text);
+      // Set the final text (streaming chunks already filled it; this is the
+      // authoritative complete version).
+      set((s) => ({
+        chatBusy: false,
+        chatHistory: s.chatHistory.map((m, i) =>
+          i === s.chatHistory.length - 1 ? { ...m, content: reply || m.content } : m,
+        ),
+      }));
+    } catch (e) {
+      set((s) => ({
+        chatBusy: false,
+        chatHistory: s.chatHistory.map((m, i) =>
+          i === s.chatHistory.length - 1 ? { ...m, content: m.content || `⚠ ${String(e)}` } : m,
+        ),
+      }));
+    }
+  },
+  appendChatChunk: (text) =>
+    set((s) => ({
+      chatHistory: s.chatHistory.map((m, i) =>
+        i === s.chatHistory.length - 1 && m.role === "assistant"
+          ? { ...m, content: m.content + text }
+          : m,
+      ),
+    })),
+  clearChat: () => set({ chatHistory: [] }),
 
   // ---- server dashboard ----
   serverInfo: null,

@@ -102,6 +102,7 @@ pub fn run() {
             commands::remove_whitelist,
             // Diagnosis
             commands::ai_diagnose,
+            commands::ai_chat,
             commands::get_system_prompt,
             commands::set_system_prompt,
             commands::get_diagnosis_depth,

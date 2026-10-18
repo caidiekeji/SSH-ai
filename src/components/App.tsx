@@ -17,8 +17,10 @@ export function App() {
   useEffect(() => {
     loadProviderData();
     const sub = listen<string>("ai-chunk", (ev) => useStore.getState().appendChunk(ev.payload));
+    const chatSub = listen<string>("chat-chunk", (ev) => useStore.getState().appendChatChunk(ev.payload));
     return () => {
       sub.then((f) => f());
+      chatSub.then((f) => f());
     };
   }, []);
 

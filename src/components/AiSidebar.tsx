@@ -1,9 +1,10 @@
 // AI conversation panel: chat-style layout with its own composer (same width
-// as the panel). Diagnosis cards follow a strict three-block skeleton:
-// 总结 → 根因 → 解决方法 (numbered steps + command + insert). No model noise.
+// as the panel). Composer has three modes: 命令 (send to PTY) / 诊断 (AI +
+// terminal context) / 对话 (multi-turn chat without terminal context).
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
+import { ipc } from "../ipc";
 import type { DiagnosisCard as Card } from "../types";
 import { Icon } from "./Icon";
 
@@ -14,12 +15,13 @@ export function AiSidebar() {
   const diagError = useStore((s) => s.diagError);
   const sessionId = useStore((s) => s.sessionId);
   const connStatus = useStore((s) => s.connStatus);
+  const chatHistory = useStore((s) => s.chatHistory);
   const listRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to the newest message.
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
-  }, [cards, diagState]);
+  }, [cards, diagState, chatHistory]);
 
   const analyzing = diagState === "T1_ANALYZING";
 
@@ -33,11 +35,11 @@ export function AiSidebar() {
       </div>
 
       <div className="chat-list" ref={listRef}>
-        {cards.length === 0 && (
+        {cards.length === 0 && chatHistory.length === 0 && (
           <div className="chat-empty">
             <Icon name="sparkles" size={30} className="ai-ico big" />
-            <p>连接主机后，在这里向 AI 提问。</p>
-            <p className="dim">例如："nginx 起不来怎么办？" · 或点击终端下方的「一键诊断」。</p>
+            <p>在这里向 AI 提问。</p>
+            <p className="dim">「诊断」结合终端输出分析 · 「对话」自由多轮问答 · 「命令」直接执行。</p>
           </div>
         )}
 
@@ -59,6 +61,28 @@ export function AiSidebar() {
         {cards.map((c) => (
           <ChatMessage key={c.id} card={c} />
         ))}
+
+        {chatHistory.length > 0 && (
+          <>
+            <div className="chat-sep">
+              <span>对话</span>
+              <button className="mini" title="清空对话记录" onClick={() => useStore.getState().clearChat()}>
+                清空
+              </button>
+            </div>
+            {chatHistory.map((m, i) => (
+              <div key={i} className="chat-msg">
+                {m.role === "user" ? (
+                  <div className="bubble user">{m.content}</div>
+                ) : (
+                  <div className="bubble ai">
+                    {m.content || (i === chatHistory.length - 1 ? "…" : "")}
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
       </div>
 
       {/* quick error triggers */}
@@ -73,12 +97,114 @@ export function AiSidebar() {
         </div>
       )}
 
-      {/* Input lives in the single bottom bar (# = AI, plain = command). */}
       {analyzing && (
         <div className="analyzing-strip">
           <Icon name="sparkles" size={13} className="ai-ico spin" /> 正在分析，结果将显示在这里
         </div>
       )}
+
+      {/* Composer: mode chips (命令/诊断/对话) + send, per panel layout */}
+      <Composer />
+    </div>
+  );
+}
+
+// Composer lives at the bottom of the AI panel: tall textarea, mode chips
+// bottom-left, send button bottom-right (per approved sketch).
+function Composer() {
+  const mode = useStore((s) => s.composerMode);
+  const setMode = useStore((s) => s.setComposerMode);
+  const chatBusy = useStore((s) => s.chatBusy);
+  const [text, setText] = useState("");
+  const [err, setErr] = useState("");
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const autoGrow = () => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = "0px";
+    ta.style.height = `${Math.min(160, Math.max(64, ta.scrollHeight))}px`;
+  };
+
+  const placeholder =
+    mode === "cmd"
+      ? "输入命令，Enter 直接执行"
+      : mode === "diag"
+        ? "描述问题，AI 将结合当前终端输出进行分析"
+        : "与 AI 自由对话（多轮），不读取终端输出";
+
+  const send = () => {
+    const t = text.trim();
+    if (!t) return;
+    const st = useStore.getState();
+    setErr("");
+    if (mode === "cmd") {
+      if (!st.sessionId) {
+        setErr("请先连接主机再发送命令");
+        return;
+      }
+      ipc.terminalWrite(st.sessionId, new TextEncoder().encode(t + "\n"));
+    } else if (mode === "diag") {
+      if (!st.sessionId) {
+        setErr("请先连接主机再进行诊断");
+        return;
+      }
+      st.startDiagnosis(t);
+    } else {
+      st.sendChat(t);
+    }
+    setText("");
+    if (taRef.current) taRef.current.style.height = "64px";
+  };
+
+  return (
+    <div className={`composer ${mode}`}>
+      <textarea
+        ref={taRef}
+        rows={2}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          autoGrow();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            send();
+          }
+        }}
+        placeholder={placeholder}
+        spellCheck={false}
+      />
+      <div className="composer-foot">
+        <div className="composer-modes">
+          <button
+            className={`mode-chip ${mode === "cmd" ? "active" : ""}`}
+            onClick={() => setMode("cmd")}
+            title="直接把文本作为命令发送到终端执行"
+          >
+            <Icon name="terminal" size={12} /> 命令
+          </button>
+          <button
+            className={`mode-chip ${mode === "diag" ? "active" : ""}`}
+            onClick={() => setMode("diag")}
+            title="结合当前终端输出进行 AI 诊断"
+          >
+            <Icon name="sparkles" size={12} /> 诊断
+          </button>
+          <button
+            className={`mode-chip ${mode === "chat" ? "active" : ""}`}
+            onClick={() => setMode("chat")}
+            title="与 AI 多轮自由对话（不读取终端输出）"
+          >
+            <Icon name="pencil" size={12} /> 对话
+          </button>
+        </div>
+        <button className="composer-send" onClick={send} disabled={!text.trim() || (mode === "chat" && chatBusy)}>
+          发送
+        </button>
+      </div>
+      {err && <div className="composer-err">{err}</div>}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 //! Tauri IPC commands. Rust owns the final say on security (PRD §10.3):
 //! risk grading, prefill gating, keychain access, known-hosts — all here.
 
-use crate::ai::{parse_response, run_diagnosis, DiagnosisRequest};
+use crate::ai::{parse_response, run_chat, run_diagnosis, ChatTurn, DiagnosisRequest};
 use crate::keyring_store as keyring;
 use crate::provider::specs::PROVIDER_SPECS;
 use crate::provider::{make_adapter, ProviderProfile};
@@ -560,6 +560,62 @@ pub async fn ai_diagnose(
 #[tauri::command]
 pub fn parse_preview(raw: String) -> serde_json::Value {
     serde_json::to_value(parse_response(&raw, false)).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// AI chat mode: multi-turn conversation without terminal context. Streams
+// via "chat-chunk" events (separate from the diagnosis "ai-chunk" stream).
+// Pure data path (HC-03): the response is text only, never executed.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn ai_chat(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    history: Vec<ChatTurn>,
+    question: String,
+) -> Result<String, String> {
+    let (profile, key) = {
+        let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = profiles
+            .last()
+            .cloned()
+            .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+        let key = resolve_key(&state, &profile.id, None)?;
+        (profile, key)
+    };
+
+    // Guard against concurrent chats (per app, not per session). AtomicBool
+    // avoids holding a non-Send std guard across the await.
+    static CHAT_INFLIGHT: std::sync::OnceLock<std::sync::atomic::AtomicBool> =
+        std::sync::OnceLock::new();
+    let flag = CHAT_INFLIGHT.get_or_init(|| std::sync::atomic::AtomicBool::new(false));
+    if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("已有对话正在进行".into());
+    }
+
+    let chat_result = async {
+        let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
+        let custom = {
+            let sp = state.system_prompt();
+            if sp.is_empty() { None } else { Some(sp) }
+        };
+        let app_for_chunks = app.clone();
+        run_chat(
+            adapter.as_ref(),
+            &history,
+            &question,
+            custom.as_deref(),
+            &mut move |chunk| {
+                let _ = app_for_chunks.emit("chat-chunk", chunk);
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+    .await;
+    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    chat_result
 }
 
 // ---------------------------------------------------------------------------
