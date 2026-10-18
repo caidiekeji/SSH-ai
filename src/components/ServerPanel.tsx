@@ -76,7 +76,7 @@ export function ServerPanel() {
         use_saved_password: has,
         connection_id: conn.id,
       });
-      st.setConn({ sessionId: res.sessionId, connStatus: "connected" });
+      st.openTab(res.sessionId, conn.name, `${conn.host}:${conn.port}`);
     } catch (e) {
       st.setConn({ connStatus: "error", connError: String(e) });
     }
@@ -99,7 +99,7 @@ export function ServerPanel() {
       const conn = connFromForm(form, `conn-${Date.now()}`);
       await ipc.saveConnection(conn, form.password || null);
       await loadConnections();
-      st.setConn({ sessionId: res.sessionId, connStatus: "connected" });
+      st.openTab(res.sessionId, conn.name, `${form.host}:${form.port}`);
       setShowAdd(false);
       setErr("");
     } catch (e) {
@@ -110,8 +110,7 @@ export function ServerPanel() {
 
   const disconnect = async () => {
     const st = useStore.getState();
-    if (st.sessionId) await ipc.sshDisconnect(st.sessionId);
-    st.setConn({ sessionId: null, connStatus: "disconnected" });
+    if (st.activeTabId != null) await st.closeTab(st.activeTabId);
   };
 
   const connected = connStatus === "connected";

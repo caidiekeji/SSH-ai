@@ -20,6 +20,13 @@ import type {
 
 export type ConnStatus = "disconnected" | "connecting" | "connected" | "closed" | "error";
 
+export interface TermTab {
+  sessionId: number;
+  title: string;
+  host: string;
+  status: ConnStatus;
+}
+
 interface PendingPrefill {
   command: string;
   aiRiskHint: string;
@@ -35,6 +42,14 @@ interface Store {
   connections: ConnectionConfig[];
   setConn: (s: Partial<Pick<Store, "sessionId" | "connStatus" | "connError" | "activeHost">>) => void;
   loadConnections: () => Promise<void>;
+
+  // ---- multi-host tabs ----
+  tabs: TermTab[];
+  activeTabId: number | null;
+  openTab: (sessionId: number, title: string, host: string) => void;
+  switchTab: (sessionId: number) => void;
+  closeTab: (sessionId: number) => Promise<void>;
+  setTabStatus: (sessionId: number, status: ConnStatus) => void;
 
   // ---- AI config (§2.2) ----
   aiState: AiConfigState;
@@ -100,6 +115,72 @@ export const useStore = create<Store>((set, get) => ({
     const connections = await ipc.listConnections();
     set({ connections });
   },
+
+  // ---- multi-host tabs ----
+  tabs: [],
+  activeTabId: null,
+  openTab: (sessionId, title, host) =>
+    set((s) => ({
+      // If this session already has a tab, just focus it (reconnect case).
+      tabs: s.tabs.some((t) => t.sessionId === sessionId)
+        ? s.tabs.map((t) => (t.sessionId === sessionId ? { ...t, status: "connected" as ConnStatus } : t))
+        : [...s.tabs, { sessionId, title, host, status: "connected" as ConnStatus }],
+      activeTabId: sessionId,
+      sessionId,
+      connStatus: "connected" as ConnStatus,
+      connError: "",
+      activeHost: host,
+      // Reset dashboard so the poll effect refetches for the new active tab.
+      serverInfo: null,
+      files: { path: "~", entries: [] },
+      fileError: "",
+    })),
+  switchTab: (sessionId) => {
+    const t = get().tabs.find((x) => x.sessionId === sessionId);
+    if (!t) return;
+    set({
+      activeTabId: sessionId,
+      sessionId,
+      connStatus: t.status,
+      connError: "",
+      activeHost: t.host,
+      serverInfo: null,
+      files: { path: "~", entries: [] },
+      fileError: "",
+    });
+  },
+  closeTab: async (sessionId) => {
+    const { tabs, activeTabId } = get();
+    await ipc.sshDisconnect(sessionId).catch(() => {});
+    const rest = tabs.filter((t) => t.sessionId !== sessionId);
+    if (rest.length === 0) {
+      set({
+        tabs: [],
+        activeTabId: null,
+        sessionId: null,
+        connStatus: "disconnected",
+        connError: "",
+        activeHost: "",
+        serverInfo: null,
+        files: { path: "~", entries: [] },
+      });
+      return;
+    }
+    if (activeTabId === sessionId) {
+      const next = rest[rest.length - 1];
+      get().switchTab(next.sessionId);
+    }
+    set({ tabs: rest });
+  },
+  setTabStatus: (sessionId, status) =>
+    set((s) => {
+      const tabs = s.tabs.map((t) => (t.sessionId === sessionId ? { ...t, status } : t));
+      const isActive = s.activeTabId === sessionId;
+      return {
+        tabs,
+        ...(isActive ? { connStatus: status } : {}),
+      };
+    }),
 
   // ---- AI config ----
   aiState: "S0_UNCONFIGURED",

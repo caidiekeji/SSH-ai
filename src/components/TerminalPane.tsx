@@ -54,22 +54,25 @@ export function xtermThemeFor(theme: ThemeName) {
   }
 }
 
-export function TerminalPane() {
+// One xterm instance per open tab. Hidden tabs keep their listeners and
+// scrollback alive; only visibility toggles, so background sessions keep
+// receiving output while the user works in another tab.
+function TerminalHost({ sessionId, active }: { sessionId: number; active: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const sessionId = useStore((s) => s.sessionId);
-  const connStatus = useStore((s) => s.connStatus);
-  const activeHost = useStore((s) => s.activeHost);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const tab = useStore((s) => s.tabs.find((t) => t.sessionId === sessionId));
+  const status = tab?.status ?? "connected";
+  const host = tab?.host ?? "";
   const addErrorBlock = useStore((s) => s.addErrorBlock);
-  const setConn = useStore((s) => s.setConn);
-  const startDiagnosis = useStore((s) => s.startDiagnosis);
-  const diagState = useStore((s) => s.diagState);
+  const setTabStatus = useStore((s) => s.setTabStatus);
   const theme = useStore((s) => s.theme);
 
-  // Terminal lifecycle: recreate whenever a session id appears.
+  // Terminal lifecycle: create once per session id.
   useEffect(() => {
-    if (!sessionId || !hostRef.current) return;
+    if (!hostRef.current) return;
     const term = new Terminal({
       fontSize: 13,
       fontFamily: '"JetBrains Mono", "Cascadia Mono", Consolas, "Courier New", monospace',
@@ -81,7 +84,14 @@ export function TerminalPane() {
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
     term.open(hostRef.current);
-    fit.fit();
+    if (activeRef.current) {
+      try {
+        fit.fit();
+        ipc.terminalResize(sessionId, term.cols, term.rows);
+      } catch {
+        /* pane hidden */
+      }
+    }
     termRef.current = term;
     fitRef.current = fit;
 
@@ -101,7 +111,7 @@ export function TerminalPane() {
     const statusSub = listen<{ sessionId: number; status: string }>("ssh-status", (ev) => {
       if (ev.payload.sessionId !== sessionId) return;
       if (ev.payload.status === "closed" || ev.payload.status === "exited") {
-        setConn({ connStatus: "closed" });
+        setTabStatus(sessionId, "closed");
       }
     });
 
@@ -111,6 +121,7 @@ export function TerminalPane() {
     });
 
     const resize = () => {
+      if (!activeRef.current) return; // hidden tab: skip fit/resize
       try {
         fit.fit();
         ipc.terminalResize(sessionId, term.cols, term.rows);
@@ -119,8 +130,7 @@ export function TerminalPane() {
       }
     };
     const ro = new ResizeObserver(resize);
-    if (hostRef.current) ro.observe(hostRef.current);
-    resize();
+    if (hostRef.current) ro.observe(hostRef.current.parentElement ?? hostRef.current);
 
     return () => {
       ro.disconnect();
@@ -130,8 +140,22 @@ export function TerminalPane() {
       dataSub.dispose();
       term.dispose();
       termRef.current = null;
+      fitRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // Refit when the tab becomes visible again.
+  useEffect(() => {
+    if (active && termRef.current && fitRef.current) {
+      try {
+        fitRef.current.fit();
+        ipc.terminalResize(sessionId, termRef.current.cols, termRef.current.rows);
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [active, sessionId]);
 
   // Keep xterm colors in sync with the app color mode.
   useEffect(() => {
@@ -139,23 +163,75 @@ export function TerminalPane() {
   }, [theme]);
 
   return (
+    <div className="term-host-inner" style={{ display: active ? "flex" : "none" }}>
+      <div ref={hostRef} className="term-host" />
+      {status !== "connected" && (
+        <div className="terminal-empty terminal-empty-overlay">
+          <div>
+            {status === "connecting"
+              ? `正在连接 ${host} …`
+              : status === "closed"
+                ? "会话已结束。可关闭此标签页，或从左侧重新连接。"
+                : "连接未建立。"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function TerminalPane() {
+  const tabs = useStore((s) => s.tabs);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const connError = useStore((s) => s.connError);
+  const switchTab = useStore((s) => s.switchTab);
+  const closeTab = useStore((s) => s.closeTab);
+  const startDiagnosis = useStore((s) => s.startDiagnosis);
+  const diagState = useStore((s) => s.diagState);
+  const activeTab = tabs.find((t) => t.sessionId === activeTabId);
+
+  return (
     <div className="terminal-pane">
+      {tabs.length > 0 && (
+        <div className="term-tabs">
+          {tabs.map((t) => (
+            <div
+              key={t.sessionId}
+              className={`term-tab ${t.sessionId === activeTabId ? "active" : ""} ${t.status}`}
+              onClick={() => switchTab(t.sessionId)}
+              title={`${t.title}（${t.host}）`}
+            >
+              <span className={`host-dot ${t.status === "connected" ? "on" : ""}`} />
+              <span className="tab-title">{t.title}</span>
+              <button
+                className="tab-close"
+                title="断开并关闭"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeTab(t.sessionId);
+                }}
+              >
+                <Icon name="x" size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="term-host-wrap">
-        {connStatus === "connected" ? (
-          <div ref={hostRef} className="term-host" />
-        ) : (
+        {tabs.length === 0 ? (
           <div className="terminal-empty">
             <div>
-              {connStatus === "connecting"
-                ? `正在连接 ${activeHost} …`
-                : connStatus === "closed"
-                  ? "会话已结束。从左侧选择主机重新连接。"
-                  : "尚未连接。\n选择左侧主机，或点击「+ 添加主机」。\n连接后可在右侧 AI 对话面板提问。"}
+              {connStatusEmptyText(connError) ||
+                "尚未连接。\n选择左侧主机，或点击「+ 添加主机」。\n连接后可在右侧 AI 对话面板提问。"}
             </div>
           </div>
+        ) : (
+          tabs.map((t) => (
+            <TerminalHost key={t.sessionId} sessionId={t.sessionId} active={t.sessionId === activeTabId} />
+          ))
         )}
         {/* Floating diagnose button: docks as icon-only circle, expands on hover */}
-        {connStatus === "connected" && (
+        {activeTab?.status === "connected" && (
           <button
             className={`term-fab ${diagState === "T1_ANALYZING" ? "busy" : ""}`}
             disabled={diagState === "T1_ANALYZING"}
@@ -169,4 +245,9 @@ export function TerminalPane() {
       </div>
     </div>
   );
+}
+
+function connStatusEmptyText(connError: string): string {
+  if (connError) return `连接失败：${connError}`;
+  return "";
 }
