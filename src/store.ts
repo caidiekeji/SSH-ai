@@ -97,7 +97,7 @@ interface Store {
   // ---- agent mode (automated ops loop) ----
   agentStatus: "idle" | "running" | "waiting" | "done" | "failed" | "stopped";
   agentGoal: string;
-  agentSteps: { no: number; command: string; description: string; output: string; risk: string }[];
+  agentSteps: { no: number; command: string; description: string; output: string; risk: string; kind: "exec" | "verify" }[];
   agentApproval: { command: string; description: string; level: string } | null;
   agentError: string;
   _agentResolve: ((ok: boolean) => void) | null;
@@ -129,6 +129,26 @@ let diagRunning = false;
 
 // Previous raw byte/sector counters (for computing per-second rates).
 let lastIoRaw: { sessionId: number; rx: number; tx: number; dr: number; dw: number; t: number } | null = null;
+
+// Retry helper for transient AI errors (network / timeout / rate limit).
+// Auth-classified errors and non-matching messages fail immediately.
+const RETRYABLE_AI_ERRORS = ["网络", "超时", "频率", "HTTP 5", "HTTP 429", "连接"];
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let a = 0; a < attempts; a++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e);
+      const retryable = RETRYABLE_AI_ERRORS.some((k) => msg.includes(k));
+      if (!retryable || a === attempts - 1) break;
+      // Exponential backoff + jitter: 2s, 4s (+0~800ms).
+      await new Promise((r) => setTimeout(r, 2000 * (a + 1) + Math.random() * 800));
+    }
+  }
+  throw lastErr;
+}
 
 export const useStore = create<Store>((set, get) => ({
   sessionId: null,
@@ -438,17 +458,23 @@ export const useStore = create<Store>((set, get) => ({
   },
   agentLoop: async () => {
     const MAX_STEPS = 12;
+    let verifyAsked = false; // 是否已要求 AI 补验证（防无限验证循环）
     for (let i = 1; i <= MAX_STEPS; i++) {
       const st = get();
       if (st.agentStatus !== "running" || !st.sessionId) return;
+      const hasVerify = st.agentSteps.some((s) => s.kind === "verify");
+      const requireVerification = verifyAsked && !hasVerify;
 
-      // 1. Plan the next step (AI returns pure data).
+      // 1. Plan the next step (AI returns pure data; transient errors retried).
       let step: Awaited<ReturnType<typeof ipc.agentStep>>;
       try {
-        step = await ipc.agentStep(
-          st.sessionId,
-          st.agentGoal,
-          st.agentSteps.map((s) => ({ command: s.command, output: s.output })),
+        step = await withRetry(() =>
+          ipc.agentStep(
+            st.sessionId!,
+            st.agentGoal,
+            st.agentSteps.map((s) => ({ command: s.command, output: s.output })),
+            requireVerification,
+          ),
         );
       } catch (e) {
         set({ agentStatus: "failed", agentError: String(e) });
@@ -457,6 +483,11 @@ export const useStore = create<Store>((set, get) => ({
       if (get().agentStatus !== "running") return;
 
       if (step.action === "done") {
+        // P0 加固：done 必须有 verify 证据；否则强制 AI 补一条验证命令。
+        if (!hasVerify && !verifyAsked) {
+          verifyAsked = true;
+          continue;
+        }
         set({ agentStatus: "done" });
         return;
       }
@@ -469,6 +500,7 @@ export const useStore = create<Store>((set, get) => ({
         set({ agentStatus: "failed", agentError: "Agent 返回了空命令" });
         return;
       }
+      const kind: "exec" | "verify" = step.action === "verify" ? "verify" : "exec";
 
       // 2. Local risk grading (AI hint NOT trusted — PRD §5.5).
       const assessment = await ipc.assessRisk(command, step.riskHint || "read");
@@ -491,13 +523,13 @@ export const useStore = create<Store>((set, get) => ({
         }
       }
 
-      // 4. Execute on the separate oneshot channel.
+      // 4. Execute on the separate oneshot channel (60s for real ops commands).
       let output = "";
       try {
-        output = await ipc.execOneshot(st.sessionId, command);
+        output = await ipc.execOneshot(st.sessionId, command, 60);
       } catch (e) {
         set((s) => ({
-          agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: String(e), risk: assessment.level }],
+          agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: String(e), risk: assessment.level, kind }],
           agentStatus: "failed",
           agentError: `第 ${i} 步执行失败: ${String(e)}`,
         }));
@@ -505,7 +537,17 @@ export const useStore = create<Store>((set, get) => ({
       }
       if (get().agentStatus !== "running") return;
       set((s) => ({
-        agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: output.slice(-1600), risk: assessment.level }],
+        agentSteps: [
+          ...s.agentSteps,
+          {
+            no: i,
+            command,
+            description: step.action === "verify" ? `${step.description || "验证"}${step.expect ? `（预期: ${step.expect}）` : ""}` : step.description || "",
+            output: output.slice(-1600),
+            risk: assessment.level,
+            kind,
+          },
+        ],
       }));
     }
     set({ agentStatus: "failed", agentError: `已达最大步数（${MAX_STEPS} 步），任务未完成，可检查后重试` });

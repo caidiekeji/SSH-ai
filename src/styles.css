@@ -1788,3 +1788,14 @@ button.small { white-space: nowrap; min-height: 29px; }
 button.primary, button:not([class]) { transition: filter 150ms ease, border-color 150ms ease, background 150ms ease; }
 .settings-body::-webkit-scrollbar { width: 8px; }
 .settings-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+/* verify badge on agent steps */
+.verify-badge {
+  font-size: 9.5px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}

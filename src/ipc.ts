@@ -87,16 +87,22 @@ export const ipc = {
     invoke<string>("ai_chat", { history, question }),
 
   // ---- Agent mode (automated ops loop) ----
-  agentStep: (sessionId: number, goal: string, steps: { command: string; output: string }[]) =>
+  agentStep: (
+    sessionId: number,
+    goal: string,
+    steps: { command: string; output: string }[],
+    requireVerification?: boolean,
+  ) =>
     invoke<{
-      action: "command" | "done" | "giveup";
+      action: "command" | "verify" | "done" | "giveup";
       command?: string;
       description?: string;
       reasoning?: string;
       summary?: string;
       reason?: string;
+      expect?: string;
       riskHint?: string;
-    }>("agent_step", { sessionId, goal, steps }),
+    }>("agent_step", { sessionId, goal, steps, requireVerification }),
   getAgentConfig: () => invoke<{ autoGreen: boolean }>("get_agent_config"),
   setAgentConfig: (autoGreen: boolean) => invoke<void>("set_agent_config", { autoGreen }),
 
@@ -117,8 +123,8 @@ export const ipc = {
   setDiagnosisDepth: (depth: number) => invoke<void>("set_diagnosis_depth", { depth }),
 
   // ---- Server dashboard (user-initiated exec on a separate channel) ----
-  execOneshot: (sessionId: number, command: string) =>
-    invoke<string>("exec_oneshot", { sessionId, command }),
+  execOneshot: (sessionId: number, command: string, timeoutSecs?: number) =>
+    invoke<string>("exec_oneshot", { sessionId, command, timeoutSecs }),
 
   // ---- Private key upload ----
   saveUploadedKey: (name: string, content: string) =>

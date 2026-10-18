@@ -569,6 +569,7 @@ pub async fn agent_step(
     session_id: u64,
     goal: String,
     steps: Vec<AgentStepIn>,
+    require_verification: Option<bool>,
 ) -> Result<crate::ai::AgentStepOut, String> {
     let (profile, key) = {
         let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
@@ -601,9 +602,16 @@ pub async fn agent_step(
     };
     let sys_text = crate::pipeline::context::format_system_context(&sys_info);
     let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
-    run_agent_step(adapter.as_ref(), &goal, &steps, &sys_text, &tail)
-        .await
-        .map_err(|e| e.to_string())
+    run_agent_step(
+        adapter.as_ref(),
+        &goal,
+        &steps,
+        &sys_text,
+        &tail,
+        require_verification.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -859,8 +867,12 @@ pub async fn exec_oneshot(
     state: State<'_, AppState>,
     session_id: u64,
     command: String,
+    /// Optional per-call timeout (5..=300 s). Default 15 s for dashboard
+    /// probes; the Agent loop passes 60 s for real ops commands.
+    timeout_secs: Option<u64>,
 ) -> Result<String, String> {
     use russh::ChannelMsg;
+    let timeout = timeout_secs.unwrap_or(15).clamp(5, 300);
     // Clone the Arc'd cell out of the map, then drop the std guard BEFORE
     // any await so the future stays Send.
     let handle_cell = {
@@ -887,7 +899,7 @@ pub async fn exec_oneshot(
 
     let mut out = Vec::new();
     loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(15), ch.wait()).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout), ch.wait()).await {
             Ok(Some(ChannelMsg::Data { ref data })) => out.extend_from_slice(data),
             Ok(Some(ChannelMsg::ExtendedData { ref data, .. })) => out.extend_from_slice(data),
             // ExitStatus/Eof/Close/None: output complete.
