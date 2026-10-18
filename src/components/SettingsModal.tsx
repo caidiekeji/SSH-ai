@@ -9,6 +9,14 @@ import { useStore } from "../store";
 import { ipc } from "../ipc";
 import type { ConnectionConfig, ProviderProfile, ProviderSpec, ThemeName } from "../types";
 import { Icon } from "./Icon";
+import {
+  HostFormFields,
+  connFromForm,
+  emptyHostForm,
+  formFromConn,
+  useKeyUpload,
+  type HostFormValues,
+} from "./HostForm";
 
 type Tab = "ai" | "ssh" | "ui";
 
@@ -17,6 +25,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="modal-backdrop">
       <div className="settings-modal">
+        <button className="modal-x" title="关闭 (Esc)" onClick={onClose}>
+          <Icon name="x" size={16} />
+        </button>
         <div className="settings-nav">
           <div className="settings-brand">
             <span className="brand-mark">{">_"}</span>
@@ -47,7 +58,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </div>
           </div>
           <div className="settings-nav-foot">
-            <button onClick={onClose}>关闭</button>
+            <div className="nav-version">AI SSH Assistant · v0.1.0</div>
           </div>
         </div>
         <div className="settings-body">
@@ -274,6 +285,9 @@ function AiSettings({ onClose }: { onClose: () => void }) {
         </div>
       </section>
 
+      {/* unified token management */}
+      <TokenManager />
+
       {/* config wizard */}
       <section className="set-section">
         <h3 className="set-title">
@@ -397,67 +411,156 @@ function AiSettings({ onClose }: { onClose: () => void }) {
   );
 }
 
-/* ================= SSH 主机管理 ================= */
+/* ================= Token 统一管理 ================= */
 
+function TokenManager() {
+  const profiles = useStore((s) => s.profiles);
+  const [keyState, setKeyState] = useState<Record<string, boolean>>({});
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const ids = profiles.map((p) => p.id).join(",");
+  const refreshKeys = async () => {
+    const entries = await Promise.all(
+      profiles.map(async (p) => [p.id, await ipc.hasApiKey(p.id).catch(() => false)] as const),
+    );
+    setKeyState(Object.fromEntries(entries));
+  };
+  useEffect(() => {
+    refreshKeys();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ids]);
+
+  const saveKey = async (p: ProviderProfile) => {
+    if (!draft.trim()) return;
+    setBusy(true);
+    try {
+      await ipc.saveProfile(p, draft.trim());
+      setEditing(null);
+      setDraft("");
+      setMsg(`已更新「${p.name}」的 API Key`);
+      await refreshKeys();
+      setTimeout(() => setMsg(""), 2500);
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearKey = async (p: ProviderProfile) => {
+    if (!window.confirm(`确定清除「${p.name}」已保存的 API Key？（Profile 保留，诊断前需重新填写）`)) return;
+    setBusy(true);
+    try {
+      await ipc.deleteApiKey(p.id);
+      setMsg(`已清除「${p.name}」的 API Key`);
+      await refreshKeys();
+      setTimeout(() => setMsg(""), 2500);
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (profiles.length === 0) return null;
+  return (
+    <section className="set-section">
+      <h3 className="set-title">API 密钥（Token）统一管理</h3>
+      <div className="dim-note" style={{ marginBottom: 8 }}>
+        所有密钥仅存于系统凭据库，不落盘、不进入日志。在此集中更换或清除。
+      </div>
+      <div className="token-list">
+        {profiles.map((p) => {
+          const has = !!keyState[p.id];
+          return (
+            <div key={p.id} className="token-row">
+              <span className={`key-dot ${has ? "on" : "off"}`} />
+              <div className="token-main">
+                <div className="token-name">{p.name}</div>
+                <div className="token-sub">{p.provider_id} · {p.model || "未选模型"}</div>
+              </div>
+              <span className={`auth-badge ${has ? "" : "missing"}`}>{has ? "已配置" : "未配置"}</span>
+              {editing === p.id ? (
+                <div className="token-edit">
+                  <input
+                    type="password"
+                    value={draft}
+                    autoFocus
+                    onChange={(e) => setDraft(e.target.value)}
+                    placeholder="粘贴新的 API Key"
+                    spellCheck={false}
+                  />
+                  <button className="primary small" disabled={!draft.trim() || busy} onClick={() => saveKey(p)}>保存</button>
+                  <button className="small" onClick={() => { setEditing(null); setDraft(""); }}>取消</button>
+                </div>
+              ) : (
+                <div className="token-actions">
+                  <button className="small" onClick={() => { setEditing(p.id); setDraft(""); setMsg(""); }}>
+                    <Icon name="pencil" size={12} /> {has ? "更换" : "填写"}
+                  </button>
+                  {has && (
+                    <button className="small" disabled={busy} onClick={() => clearKey(p)}>
+                      清除
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {msg && <div className="ok-text" style={{ marginTop: 8 }}>{msg}</div>}
+      <div className="dim-note" style={{ marginTop: 6 }}>共 {profiles.length} 个 Profile，密钥状态实时读取自系统凭据库。</div>
+    </section>
+  );
+}
+
+/* ================= SSH 主机管理 ================= */
 function SshManager() {
   const connections = useStore((s) => s.connections);
   const loadConnections = useStore((s) => s.loadConnections);
   const connStatus = useStore((s) => s.connStatus);
   const activeHost = useStore((s) => s.activeHost);
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({
-    name: "",
-    host: "",
-    port: 22,
-    username: "root",
-    authMethod: "password" as "password" | "publickey",
-    password: "",
-    keyPath: "",
-    keyFileName: "",
-  });
-  const [keyBusy, setKeyBusy] = useState(false);
-
-  const onKeyFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setKeyBusy(true);
-    setErr("");
-    try {
-      const content = await f.text();
-      const path = await ipc.saveUploadedKey(`key-${Date.now()}`, content);
-      setForm((prev) => ({ ...prev, keyPath: path, keyFileName: f.name }));
-    } catch (err) {
-      setErr(String(err));
-    } finally {
-      setKeyBusy(false);
-      e.target.value = "";
-    }
-  };
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<HostFormValues>(emptyHostForm);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const { keyBusy, onKeyFile } = useKeyUpload(setForm, setErr);
 
   useEffect(() => {
     loadConnections();
   }, []);
 
-  const add = async () => {
+  const openAdd = () => {
+    setEditingId(null);
+    setForm(emptyHostForm());
+    setErr("");
+    setShowAdd(true);
+  };
+
+  const openEdit = (c: ConnectionConfig) => {
+    setEditingId(c.id);
+    setForm(formFromConn(c));
+    setErr("");
+    setShowAdd(true);
+  };
+
+  const save = async () => {
     if (!form.host || !form.username) return;
     setBusy(true);
     setErr("");
     try {
-      const conn: ConnectionConfig = {
-        id: `conn-${Date.now()}`,
-        name: form.name || form.host,
-        host: form.host,
-        port: Number(form.port) || 22,
-        username: form.username,
-        auth_method: form.authMethod,
-        key_path: form.authMethod === "publickey" ? form.keyPath : null,
-      };
+      const conn = connFromForm(form, editingId ?? `conn-${Date.now()}`);
+      // Empty password in edit mode → the stored keychain secret is kept.
       await ipc.saveConnection(conn, form.password || null);
       await loadConnections();
       setShowAdd(false);
-      setForm({ name: "", host: "", port: 22, username: "root", authMethod: "password", password: "", keyPath: "", keyFileName: "" });
+      setEditingId(null);
+      setForm(emptyHostForm());
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -476,8 +579,8 @@ function SshManager() {
       <section className="set-section">
         <div className="set-title-row">
           <h3 className="set-title">已保存主机（{connections.length}）</h3>
-          <button className="primary small" onClick={() => setShowAdd(!showAdd)}>
-            <Icon name="plus" size={12} /> {showAdd ? "收起" : "添加主机"}
+          <button className="primary small" onClick={openAdd}>
+            <Icon name="plus" size={12} /> 添加主机
           </button>
         </div>
 
@@ -495,6 +598,9 @@ function SshManager() {
                   </div>
                 </div>
                 <span className="auth-badge">{c.auth_method === "password" ? "密码" : "私钥"}</span>
+                <button className="icon-op" title="编辑" onClick={() => openEdit(c)}>
+                  <Icon name="pencil" size={13} />
+                </button>
                 <button className="icon-op danger" title="删除" onClick={() => remove(c.id)}>
                   <Icon name="trash" size={13} />
                 </button>
@@ -506,51 +612,14 @@ function SshManager() {
 
       {showAdd && (
         <section className="set-section">
-          <h3 className="set-title">添加主机</h3>
+          <h3 className="set-title">{editingId ? "编辑主机" : "添加主机"}</h3>
           <div className="ssh-form">
-            <div className="ssh-form-grid">
-              <label>名称</label>
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="可选，默认用主机名" />
-              <label>主机</label>
-              <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="192.168.1.10" spellCheck={false} />
-              <label>端口</label>
-              <input value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) || 22 })} />
-              <label>用户名</label>
-              <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} spellCheck={false} />
-              <label>认证方式</label>
-              <select value={form.authMethod} onChange={(e) => setForm({ ...form, authMethod: e.target.value as "password" | "publickey" })}>
-                <option value="password">密码</option>
-                <option value="publickey">私钥</option>
-              </select>
-              {form.authMethod === "password" ? (
-                <>
-                  <label>密码</label>
-                  <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="存入系统凭据库" />
-                </>
-              ) : (
-                <>
-                  <label>私钥文件</label>
-                  <div className="key-upload">
-                    <label className={`upload-btn ${keyBusy ? "busy" : ""}`}>
-                      <Icon name="file" size={13} /> {keyBusy ? "上传中…" : "选择文件上传"}
-                      <input type="file" style={{ display: "none" }} onChange={onKeyFile} accept=".pem,.key,.ppk,id_rsa,id_ed25519,id_ecdsa" />
-                    </label>
-                    <span className="key-file-name" title={form.keyPath}>
-                      {form.keyFileName || "未选择（也可手动填路径）"}
-                    </span>
-                  </div>
-                  <label>私钥路径</label>
-                  <input value={form.keyPath} onChange={(e) => setForm({ ...form, keyPath: e.target.value })} placeholder="C:\Users\you\.ssh\id_ed25519" spellCheck={false} />
-                  <label>私钥口令</label>
-                  <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="无则留空，存入系统凭据库" />
-                </>
-              )}
-            </div>
+            <HostFormFields form={form} setForm={setForm} keyBusy={keyBusy} onKeyFile={onKeyFile} />
             {err && <div className="error-text">{err}</div>}
             <div className="modal-foot">
-              <button onClick={() => setShowAdd(false)}>取消</button>
-              <button className="primary" disabled={!form.host || !form.username || busy} onClick={add}>
-                {busy ? "保存中…" : "保存到凭据库"}
+              <button onClick={() => { setShowAdd(false); setEditingId(null); }}>取消</button>
+              <button className="primary" disabled={!form.host || !form.username || busy} onClick={save}>
+                {busy ? "保存中…" : editingId ? "保存修改" : "保存到凭据库"}
               </button>
             </div>
           </div>

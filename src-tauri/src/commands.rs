@@ -285,6 +285,12 @@ pub fn has_api_key(_state: State<'_, AppState>, profile_id: String) -> Result<bo
     Ok(keyring::get_secret(&profile_key_id(&profile_id))?.is_some())
 }
 
+/// Remove the stored API key (token management: revoke without deleting the profile).
+#[tauri::command]
+pub fn delete_api_key(_state: State<'_, AppState>, profile_id: String) -> Result<(), String> {
+    keyring::delete_secret(&profile_key_id(&profile_id))
+}
+
 /// Resolve an API key: explicit (typed in the form, not yet saved) takes
 /// precedence; otherwise load from the keychain.
 fn resolve_key(

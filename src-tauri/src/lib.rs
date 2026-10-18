@@ -103,6 +103,7 @@ pub fn run() {
             commands::ai_diagnose,
             commands::get_system_prompt,
             commands::set_system_prompt,
+            commands::delete_api_key,
             commands::parse_preview,
             // Server dashboard (user-initiated exec, never AI-driven)
             commands::exec_oneshot,
