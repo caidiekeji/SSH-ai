@@ -23,13 +23,14 @@ export function TerminalPane() {
     if (!sessionId || !hostRef.current) return;
     const term = new Terminal({
       fontSize: 13,
-      fontFamily: 'Consolas, "Courier New", monospace',
+      fontFamily: '"JetBrains Mono", "Cascadia Mono", Consolas, "Courier New", monospace',
       cursorBlink: true,
       theme: {
-        background: "#14161a",
-        foreground: "#dde2ea",
-        cursor: "#3b82f6",
-        selectionBackground: "#334155",
+        background: "#0f1216",
+        foreground: "#e6edf3",
+        cursor: "#4c8dff",
+        cursorAccent: "#0f1216",
+        selectionBackground: "#264f78",
       },
       scrollback: 5000,
     });
