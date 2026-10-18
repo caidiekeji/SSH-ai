@@ -103,7 +103,7 @@ async fn read_sse(
                     idle_secs = idle.as_secs()
                 )));
             }
-            Some(Ok(chunk)) => {
+            Ok(Some(Ok(chunk))) => {
                 if started.elapsed() > total {
                     return Err(ProviderError::StreamInterrupted(
                         "流式响应总时长超过 10 分钟上限，已中止".into(),
@@ -128,7 +128,7 @@ async fn read_sse(
                     }
                 }
             }
-            Some(Err(e)) => {
+            Ok(Some(Err(e))) => {
                 let detail = if e.is_timeout() {
                     "连接超时".to_string()
                 } else {
