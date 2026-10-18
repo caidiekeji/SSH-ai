@@ -82,4 +82,8 @@ export const ipc = {
   // ---- Server dashboard (user-initiated exec on a separate channel) ----
   execOneshot: (sessionId: number, command: string) =>
     invoke<string>("exec_oneshot", { sessionId, command }),
+
+  // ---- Private key upload ----
+  saveUploadedKey: (name: string, content: string) =>
+    invoke<string>("save_uploaded_key", { name, content }),
 };
