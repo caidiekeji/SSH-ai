@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -7,6 +7,10 @@ import { useStore } from "../store";
 import { ipc } from "../ipc";
 import type { ThemeName } from "../types";
 import { Icon } from "./Icon";
+
+// Live registry of open xterm instances (sessionId -> Terminal) so the
+// clear-screen button can reach the active terminal.
+const termRegistry = new Map<number, Terminal>();
 
 // xterm theme must match the CSS design tokens per color mode.
 export function xtermThemeFor(theme: ThemeName) {
@@ -84,6 +88,7 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
     term.open(hostRef.current);
+    termRegistry.set(sessionId, term);
     if (activeRef.current) {
       try {
         fit.fit();
@@ -139,6 +144,7 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
       statusSub.then((f) => f());
       dataSub.dispose();
       term.dispose();
+      termRegistry.delete(sessionId);
       termRef.current = null;
       fitRef.current = null;
     };
@@ -215,6 +221,20 @@ export function TerminalPane() {
               </button>
             </div>
           ))}
+          <button
+            className="term-clear"
+            title="清屏：清除当前终端显示内容"
+            onClick={() => {
+              const term = activeTabId != null ? termRegistry.get(activeTabId) : null;
+              if (term) {
+                term.clear();
+                term.write("\x1b[3J");
+                term.scrollToTop?.();
+              }
+            }}
+          >
+            <Icon name="eraser" size={12} /> 清屏
+          </button>
         </div>
       )}
       <div className="term-host-wrap">
@@ -243,6 +263,64 @@ export function TerminalPane() {
           </button>
         )}
       </div>
+      <InputBar />
+    </div>
+  );
+}
+
+// Composer under the terminal output: '#' prefix → AI, otherwise the text is
+// sent to the PTY as a typed command. Enter sends, Shift+Enter adds a line.
+function InputBar() {
+  const [inputText, setInputText] = useState("");
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const aiMode = inputText.startsWith("#");
+
+  const autoGrow = () => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = "0px";
+    ta.style.height = `${Math.min(140, Math.max(44, ta.scrollHeight))}px`;
+  };
+
+  const sendInput = () => {
+    const text = inputText.trim();
+    if (!text) return;
+    const st = useStore.getState();
+    if (aiMode) {
+      st.startDiagnosis(text.slice(1));
+    } else if (st.sessionId) {
+      ipc.terminalWrite(st.sessionId, new TextEncoder().encode(text + "\n"));
+    }
+    setInputText("");
+    if (taRef.current) taRef.current.style.height = "44px";
+    taRef.current?.focus();
+  };
+
+  return (
+    <div className={`inputbar ${aiMode ? "ai-mode" : ""}`}>
+      <span className="mode-ico" title={aiMode ? "AI 模式" : "命令模式"}>
+        <Icon name={aiMode ? "sparkles" : "terminal"} size={14} />
+      </span>
+      <textarea
+        ref={taRef}
+        rows={1}
+        value={inputText}
+        onChange={(e) => {
+          setInputText(e.target.value);
+          autoGrow();
+        }}
+        placeholder={aiMode ? "向 AI 描述问题，Enter 发送分析当前终端" : "输入命令，Enter 直接执行（# 开头发给 AI）"}
+        spellCheck={false}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendInput();
+          }
+        }}
+      />
+      <button className="send-btn" onClick={sendInput} disabled={!inputText.trim()} title={aiMode ? "发送给 AI (Enter)" : "执行命令 (Enter)"}>
+        <Icon name={aiMode ? "sparkles" : "arrowUpRight"} size={15} />
+      </button>
     </div>
   );
 }

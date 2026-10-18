@@ -18,10 +18,20 @@ import {
   type HostFormValues,
 } from "./HostForm";
 
-type Tab = "ai" | "ssh" | "sec" | "ui";
+type Tab = "ai" | "aiadv" | "ssh" | "sec" | "ui";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>("ai");
+
+  // Esc closes the modal.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
     <div className="modal-backdrop">
       <div className="settings-modal">
@@ -39,8 +49,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           <div className={`settings-nav-item ${tab === "ai" ? "active" : ""}`} onClick={() => setTab("ai")}>
             <span className="nav-ico"><Icon name="sparkles" size={15} /></span>
             <div>
-              <div className="nav-t">AI 设置</div>
+              <div className="nav-t">AI 配置</div>
               <div className="nav-d">厂商 · 模型 · 连通测试</div>
+            </div>
+          </div>
+          <div className={`settings-nav-item ${tab === "aiadv" ? "active" : ""}`} onClick={() => setTab("aiadv")}>
+            <span className="nav-ico"><Icon name="pencil" size={15} /></span>
+            <div>
+              <div className="nav-t">AI 高级</div>
+              <div className="nav-d">提示词 · 诊断上下文</div>
             </div>
           </div>
           <div className={`settings-nav-item ${tab === "ssh" ? "active" : ""}`} onClick={() => setTab("ssh")}>
@@ -70,6 +87,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         </div>
         <div className="settings-body">
           {tab === "ai" && <AiSettings onClose={onClose} />}
+          {tab === "aiadv" && <AiAdvanced />}
           {tab === "ssh" && <SshManager />}
           {tab === "sec" && <SecurityCenter />}
           {tab === "ui" && <Appearance />}
@@ -228,101 +246,8 @@ function AiSettings({ onClose }: { onClose: () => void }) {
     model: !!model,
   };
 
-  // ---- global system prompt (optional, applies to all providers) ----
-  const [sysPrompt, setSysPrompt] = useState("");
-  const [sysSaved, setSysSaved] = useState(false);
-  const [sysBusy, setSysBusy] = useState(false);
-  useEffect(() => {
-    ipc.getSystemPrompt().then(setSysPrompt).catch(() => {});
-  }, []);
-  const saveSysPrompt = async () => {
-    setSysBusy(true);
-    setSysSaved(false);
-    try {
-      await ipc.setSystemPrompt(sysPrompt);
-      setSysSaved(true);
-      setTimeout(() => setSysSaved(false), 2500);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSysBusy(false);
-    }
-  };
-
-  // ---- diagnosis context depth (how many recent output blocks to feed AI) ----
-  const [depth, setDepth] = useState(1);
-  const [depthSaved, setDepthSaved] = useState(false);
-  useEffect(() => {
-    ipc.getDiagnosisDepth().then((d) => setDepth(d || 1)).catch(() => {});
-  }, []);
-  const changeDepth = async (v: number) => {
-    const clamped = Math.min(10, Math.max(1, Math.round(v) || 1));
-    setDepth(clamped);
-    try {
-      await ipc.setDiagnosisDepth(clamped);
-      setDepthSaved(true);
-      setTimeout(() => setDepthSaved(false), 2000);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
   return (
     <>
-      {/* global system prompt */}
-      <section className="set-section">
-        <h3 className="set-title">系统提示词（可选）</h3>
-        <div className="dim-note" style={{ marginBottom: 8 }}>
-          自定义 AI 的回答风格，例如「把我的大白话转成专业命令并解释」。它会叠加在内置诊断规则之前，内置的输出格式与安全规则始终生效。留空使用默认。
-        </div>
-        <textarea
-          className="sys-prompt-input"
-          rows={4}
-          maxLength={2000}
-          value={sysPrompt}
-          onChange={(e) => setSysPrompt(e.target.value)}
-          placeholder="例：我是运维新手，请把我的大白话描述转成专业的排查命令，并逐步解释每条命令的作用。"
-          spellCheck={false}
-        />
-        <div className="sys-prompt-foot">
-          <span className="dim-note">{sysPrompt.length}/2000{sysSaved ? " · 已保存" : ""}</span>
-          <button className="primary small" disabled={sysBusy} onClick={saveSysPrompt}>
-            {sysBusy ? "保存中…" : "保存提示词"}
-          </button>
-        </div>
-      </section>
-
-      {/* diagnosis context depth */}
-      <section className="set-section">
-        <h3 className="set-title">诊断上下文</h3>
-        <div className="depth-row">
-          <span className="depth-label">追查前几步输出</span>
-          <div className="depth-stepper">
-            <button
-              className="depth-btn"
-              disabled={depth <= 1}
-              onClick={() => changeDepth(depth - 1)}
-              title="减少"
-            >
-              −
-            </button>
-            <span className="depth-value">{depth}</span>
-            <button
-              className="depth-btn"
-              disabled={depth >= 10}
-              onClick={() => changeDepth(depth + 1)}
-              title="增加"
-            >
-              +
-            </button>
-          </div>
-          <span className={`depth-saved ${depthSaved ? "show" : ""}`}>已保存</span>
-        </div>
-        <div className="dim-note" style={{ marginTop: 7 }}>
-          一键诊断默认只抓取<strong>最近一次</strong>命令输出进行分析；若问题可能与前几步操作有关，可增大此值，让 AI 一起查看更早的输出（最多 10 步，消耗更多 Token）。
-        </div>
-      </section>
-
       {/* saved profiles */}
       <section className="set-section">
         <h3 className="set-title">已保存 Profile</h3>
@@ -463,6 +388,110 @@ function AiSettings({ onClose }: { onClose: () => void }) {
           )}
         </div>
       </section>
+    </>
+  );
+}
+
+/* ================= AI 高级（提示词 / 诊断上下文） ================= */
+
+function AiAdvanced() {
+  const [sysPrompt, setSysPrompt] = useState("");
+  const [sysSaved, setSysSaved] = useState(false);
+  const [sysBusy, setSysBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    ipc.getSystemPrompt().then(setSysPrompt).catch(() => {});
+  }, []);
+  const saveSysPrompt = async () => {
+    setSysBusy(true);
+    setSysSaved(false);
+    try {
+      await ipc.setSystemPrompt(sysPrompt);
+      setSysSaved(true);
+      setTimeout(() => setSysSaved(false), 2500);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSysBusy(false);
+    }
+  };
+
+  // ---- diagnosis context depth (how many recent output blocks to feed AI) ----
+  const [depth, setDepth] = useState(1);
+  const [depthSaved, setDepthSaved] = useState(false);
+  useEffect(() => {
+    ipc.getDiagnosisDepth().then((d) => setDepth(d || 1)).catch(() => {});
+  }, []);
+  const changeDepth = async (v: number) => {
+    const clamped = Math.min(10, Math.max(1, Math.round(v) || 1));
+    setDepth(clamped);
+    try {
+      await ipc.setDiagnosisDepth(clamped);
+      setDepthSaved(true);
+      setTimeout(() => setDepthSaved(false), 2000);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  return (
+    <>
+      {/* global system prompt */}
+      <section className="set-section">
+        <h3 className="set-title">系统提示词（可选）</h3>
+        <div className="dim-note" style={{ marginBottom: 8 }}>
+          自定义 AI 的回答风格，例如「把我的大白话转成专业命令并解释」。它会叠加在内置诊断规则之前，内置的输出格式与安全规则始终生效。留空使用默认。
+        </div>
+        <textarea
+          className="sys-prompt-input"
+          rows={4}
+          maxLength={2000}
+          value={sysPrompt}
+          onChange={(e) => setSysPrompt(e.target.value)}
+          placeholder="例：我是运维新手，请把我的大白话描述转成专业的排查命令，并逐步解释每条命令的作用。"
+          spellCheck={false}
+        />
+        <div className="sys-prompt-foot">
+          <span className="dim-note">{sysPrompt.length}/2000{sysSaved ? " · 已保存" : ""}</span>
+          <button className="primary small" disabled={sysBusy} onClick={saveSysPrompt}>
+            {sysBusy ? "保存中…" : "保存提示词"}
+          </button>
+        </div>
+      </section>
+
+      {/* diagnosis context depth */}
+      <section className="set-section">
+        <h3 className="set-title">诊断上下文</h3>
+        <div className="depth-row">
+          <span className="depth-label">追查前几步输出</span>
+          <div className="depth-stepper">
+            <button
+              className="depth-btn"
+              disabled={depth <= 1}
+              onClick={() => changeDepth(depth - 1)}
+              title="减少"
+            >
+              −
+            </button>
+            <span className="depth-value">{depth}</span>
+            <button
+              className="depth-btn"
+              disabled={depth >= 10}
+              onClick={() => changeDepth(depth + 1)}
+              title="增加"
+            >
+              +
+            </button>
+          </div>
+          <span className={`depth-saved ${depthSaved ? "show" : ""}`}>已保存</span>
+        </div>
+        <div className="dim-note" style={{ marginTop: 7 }}>
+          一键诊断默认只抓取<strong>最近一次</strong>命令输出进行分析；若问题可能与前几步操作有关，可增大此值，让 AI 一起查看更早的输出（最多 10 步，消耗更多 Token）。
+        </div>
+      </section>
+
+      {error && <div className="error-text">{error}</div>}
     </>
   );
 }

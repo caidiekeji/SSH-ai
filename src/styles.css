@@ -777,33 +777,46 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 
 /* ---- bottom input bar: full-width docked composer, aligned with panes above ----
    '#' prefix = AI, otherwise send command to terminal */
+/* in-pane composer: sits under the terminal output, same content width,
+   multi-line auto-grow (Enter = send, Shift+Enter = newline) */
 .inputbar {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
-  padding: 8px 14px 10px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-}
-.inputbar .mode-ico { display: inline-flex; align-items: center; color: var(--text-dim); flex-shrink: 0; }
-.inputbar.ai-mode .mode-ico { color: var(--ai); }
-.inputbar input {
-  flex: 1;
-  min-width: 0;
+  flex-shrink: 0;
+  margin: 6px 10px 10px;
+  padding: 7px;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  font-family: var(--mono);
-  font-size: 13px;
-  padding: 13px 14px;
+  border-radius: 12px;
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
-.inputbar input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+.inputbar:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.inputbar .mode-ico { display: inline-flex; align-items: center; color: var(--text-dim); flex-shrink: 0; padding-bottom: 12px; }
+.inputbar.ai-mode .mode-ico { color: var(--ai); }
+.inputbar textarea {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  resize: none;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 4px;
+  color: var(--text);
+}
+.inputbar textarea:focus { border: none; box-shadow: none; }
 .inputbar .send-btn {
-  width: 40px;
-  height: 40px;
+  width: 38px;
+  height: 38px;
   padding: 0;
-  border-radius: 10px;
+  border-radius: 9px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -973,7 +986,7 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 
 .settings-body {
   overflow-y: auto;
-  padding: 22px 24px;
+  padding: 30px 24px 22px;
 }
 .set-section { margin-bottom: 26px; }
 .set-title {
@@ -1231,7 +1244,7 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 .modal-x {
   position: absolute;
   top: 10px;
-  left: 10px;
+  right: 10px;
   z-index: 6;
   width: 30px;
   height: 30px;
@@ -1250,7 +1263,7 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   border-color: transparent;
   transform: none;
 }
-.settings-nav { padding: 48px 10px 14px; }
+.settings-nav { padding: 16px 10px 14px; }
 .settings-nav-item.active .nav-ico { color: var(--accent); }
 .settings-nav-foot { padding: 8px 10px; }
 .nav-version { font-size: 10.5px; color: var(--faint); line-height: 1.5; }
@@ -1410,3 +1423,21 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   background: var(--bg);
   z-index: 5;
 }
+
+/* clear-screen button at the tab bar's right end */
+.term-clear {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  font-size: 11.5px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  background: var(--panel-2);
+  color: var(--text-dim);
+  white-space: nowrap;
+  align-self: center;
+  transition: color 130ms ease, border-color 130ms ease;
+}
+.term-clear:hover { color: var(--accent); border-color: var(--accent); }
