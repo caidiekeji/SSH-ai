@@ -579,9 +579,9 @@ pub async fn exec_oneshot(
         match tokio::time::timeout(std::time::Duration::from_secs(15), ch.wait()).await {
             Ok(Some(ChannelMsg::Data { ref data })) => out.extend_from_slice(data),
             Ok(Some(ChannelMsg::ExtendedData { ref data, .. })) => out.extend_from_slice(data),
-            // Exit/Eof/Close/None: output complete.
+            // ExitStatus/Eof/Close/None: output complete.
             Ok(Some(ChannelMsg::Eof))
-            | Ok(Some(ChannelMsg::Exit { .. }))
+            | Ok(Some(ChannelMsg::ExitStatus { .. }))
             | Ok(Some(ChannelMsg::Close))
             | Ok(None) => break,
             Ok(Some(_)) => {}

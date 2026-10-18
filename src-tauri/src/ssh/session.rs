@@ -146,7 +146,7 @@ pub struct Session {
     pub host: String,
     pub username: String,
     pub write_tx: mpsc::Sender<PtyCmd>,
-    pub handle: Mutex<Option<Handle<ClientHandler>>>,
+    pub handle: Arc<Mutex<Option<Handle<ClientHandler>>>>,
     pub pipeline: Arc<Mutex<Pipeline>>,
 }
 
@@ -211,7 +211,7 @@ pub async fn connect(
         host: req.host.clone(),
         username: req.username.clone(),
         write_tx: write_tx.clone(),
-        handle: Mutex::new(Some(handle)),
+        handle: Arc::new(Mutex::new(Some(handle))),
         pipeline: pipeline.clone(),
     };
 
