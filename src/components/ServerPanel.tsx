@@ -32,6 +32,10 @@ export function ServerPanel() {
 
   const [showAdd, setShowAdd] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [editFile, setEditFile] = useState<{ path: string; name: string } | null>(null);
+  const [editText, setEditText] = useState("");
+  const [editBusy, setEditBusy] = useState(false);
+  const [editErr, setEditErr] = useState("");
   const [form, setForm] = useState<HostFormValues>(emptyHostForm);
   const [err, setErr] = useState("");
   const { keyBusy, onKeyFile } = useKeyUpload(setForm, setErr);
@@ -183,6 +187,46 @@ export function ServerPanel() {
     }
   };
 
+  // ---- remote file edit (text files ≤ 100 KB, base64 round-trip) ----
+  const b64ToText = (b64: string) => {
+    const bin = atob(b64.replace(/\s+/g, ""));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  };
+  const textToB64 = (text: string) => {
+    const bytes = new TextEncoder().encode(text);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  };
+
+  const doEdit = async (e: FileEntry) => {
+    setEditErr("");
+    try {
+      const b64 = await runOp(`cd ${q(files.path)} && head -c 100000 -- ${q(e.name)} | base64`);
+      setEditFile({ path: `${files.path.replace(/\/+$/, "")}/${e.name}`, name: e.name });
+      setEditText(b64ToText(b64));
+    } catch (err) {
+      setEditErr(`读取失败：${String(err)}`);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!editFile) return;
+    setEditBusy(true);
+    setEditErr("");
+    try {
+      await runOp(`printf %s '${textToB64(editText)}' | base64 -d > ${q(editFile.path)}`);
+      setEditFile(null);
+      listDir(files.path);
+    } catch (err) {
+      setEditErr(`保存失败：${String(err)}`);
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
   const execEntry = (e: FileEntry) =>
     setOp({
       title: "执行确认",
@@ -317,11 +361,44 @@ export function ServerPanel() {
                     {e.name.endsWith(".sh") && (
                       <button className="icon-op" title="执行脚本" onClick={() => execEntry(e)}><Icon name="play" size={13} /></button>
                     )}
+                    {!e.dir && e.size <= 100000 && (
+                      <button className="icon-op" title="编辑文本" onClick={() => doEdit(e)}><Icon name="squarePen" size={13} /></button>
+                    )}
                     <button className="icon-op" title="重命名" onClick={() => doRename(e)}><Icon name="pencil" size={13} /></button>
                     <button className="icon-op danger" title="删除" onClick={() => doDelete(e)}><Icon name="trash" size={13} /></button>
                   </span>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- file edit modal ---- */}
+      {editFile && (
+        <div className="modal-backdrop">
+          <div className="modal modal-file">
+            <button className="modal-x" title="关闭" onClick={() => setEditFile(null)}>
+              <Icon name="x" size={16} />
+            </button>
+            <h2 className="confirm-title">
+              <Icon name="squarePen" size={16} className="ico-accent" /> 编辑 {editFile.name}
+            </h2>
+            <div className="sub">以 UTF-8 文本编辑（≤100KB），保存将覆盖远端文件</div>
+            <textarea
+              className="sys-prompt-input"
+              rows={18}
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+              spellCheck={false}
+              style={{ fontFamily: "var(--mono)", fontSize: 12 }}
+            />
+            {editErr && <div className="error-text" style={{ marginTop: 8 }}>{editErr}</div>}
+            <div className="modal-foot">
+              <button onClick={() => setEditFile(null)}>取消</button>
+              <button className="primary" disabled={editBusy} onClick={saveEdit}>
+                {editBusy ? "保存中…" : "保存到服务器"}
+              </button>
             </div>
           </div>
         </div>

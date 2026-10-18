@@ -113,11 +113,17 @@ export const ipc = {
   // ---- AI system prompt (global, optional) ----
   // ---- Prompt library (multiple named prompts, bound to modes) ----
   listPrompts: () =>
-    invoke<{ id: string; name: string; content: string; forDiag: boolean; forChat: boolean }[]>(
+    invoke<{ id: string; name: string; content: string; forDiag: boolean; forChat: boolean; forAgent: boolean }[]>(
       "list_prompts",
     ),
-  savePrompt: (entry: { id: string; name: string; content: string; forDiag: boolean; forChat: boolean }) =>
-    invoke<void>("save_prompt", { entry }),
+  savePrompt: (entry: {
+    id: string;
+    name: string;
+    content: string;
+    forDiag: boolean;
+    forChat: boolean;
+    forAgent: boolean;
+  }) => invoke<void>("save_prompt", { entry }),
   deletePrompt: (id: string) => invoke<void>("delete_prompt", { id }),
   getDiagnosisDepth: () => invoke<number>("get_diagnosis_depth"),
   setDiagnosisDepth: (depth: number) => invoke<void>("set_diagnosis_depth", { depth }),

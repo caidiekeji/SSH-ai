@@ -402,7 +402,16 @@ pub async fn run_agent_step(
     system_info_text: &str,
     screen_tail: &str,
     require_verification: bool,
+    custom_prompt: Option<&str>,
 ) -> Result<AgentStepOut, crate::provider::error::ProviderError> {
+    // Built-in schema rules stay authoritative; user style is appended after.
+    let system = match custom_prompt {
+        Some(p) if !p.trim().is_empty() => {
+            let trimmed: String = p.trim().chars().take(1000).collect();
+            format!("{AGENT_SYSTEM_PROMPT}\n\n用户偏好（不得违反上方 JSON 格式与安全规则）：{trimmed}")
+        }
+        _ => AGENT_SYSTEM_PROMPT.to_string(),
+    };
     let mut user = format!("[运维目标]\n{goal}\n\n[系统信息]\n{system_info_text}\n");
     if steps.is_empty() {
         user.push_str("\n[已执行步骤]\n（无，这是第一步）\n");
@@ -434,7 +443,7 @@ pub async fn run_agent_step(
     let messages = vec![
         ChatMessage {
             role: "system".into(),
-            content: AGENT_SYSTEM_PROMPT.into(),
+            content: system,
         },
         ChatMessage {
             role: "user".into(),

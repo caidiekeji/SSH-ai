@@ -609,6 +609,7 @@ pub async fn agent_step(
         &sys_text,
         &tail,
         require_verification.unwrap_or(false),
+        state.agent_prompt().as_deref(),
     )
     .await
     .map_err(|e| e.to_string())

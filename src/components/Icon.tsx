@@ -70,6 +70,12 @@ const P: Record<string, ReactNode> = {
       <path d="m5 11 9 9" />
     </>
   ),
+  squarePen: (
+    <>
+      <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.375 2.625a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z" />
+    </>
+  ),
   refresh: (
     <>
       <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />

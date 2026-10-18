@@ -502,9 +502,10 @@ interface PromptEntry {
   content: string;
   forDiag: boolean;
   forChat: boolean;
+  forAgent: boolean;
 }
 
-const emptyPrompt: PromptEntry = { id: "", name: "", content: "", forDiag: true, forChat: true };
+const emptyPrompt: PromptEntry = { id: "", name: "", content: "", forDiag: true, forChat: false, forAgent: false };
 
 function PromptsPage() {
   const [prompts, setPrompts] = useState<PromptEntry[]>([]);
@@ -560,7 +561,7 @@ function PromptsPage() {
           </button>
         </div>
         <div className="dim-note" style={{ marginBottom: 10 }}>
-          每条提示词可绑定到「诊断」「对话」模式；同一模式启用多条时按列表顺序合并生效。内置的输出格式与安全规则始终优先。
+          每条提示词可绑定到「诊断」「对话」「Agent」模式；同一模式启用多条时按列表顺序合并生效。内置的输出格式与安全规则始终优先。
         </div>
 
         {editing && (
@@ -601,13 +602,21 @@ function PromptsPage() {
                   />
                   对话
                 </label>
+                <label className="check-chip">
+                  <input
+                    type="checkbox"
+                    checked={editing.forAgent}
+                    onChange={(e) => setEditing({ ...editing, forAgent: e.target.checked })}
+                  />
+                  Agent
+                </label>
               </div>
             </div>
             <div className="modal-foot">
               <button onClick={() => setEditing(null)}>取消</button>
               <button
                 className="primary"
-                disabled={busy || !editing.content.trim() || (!editing.forDiag && !editing.forChat)}
+                disabled={busy || !editing.content.trim() || (!editing.forDiag && !editing.forChat && !editing.forAgent)}
                 onClick={save}
               >
                 {busy ? "保存中…" : editing.id ? "保存修改" : "创建"}
@@ -626,6 +635,7 @@ function PromptsPage() {
                   <div className="prompt-badges">
                     {p.forDiag && <span className="auth-badge">诊断</span>}
                     {p.forChat && <span className="auth-badge">对话</span>}
+                    {p.forAgent && <span className="auth-badge">Agent</span>}
                   </div>
                 </div>
                 <div className="prompt-preview">{p.content}</div>

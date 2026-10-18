@@ -1844,3 +1844,13 @@ button.primary, button:not([class]) { transition: filter 150ms ease, border-colo
 }
 .fm-list { height: 48vh; overflow-y: auto; }
 .modal-file .file-path { margin: 12px 0 8px; }
+
+/* ---- 首个区块标题行下移，避让右上角关闭按钮 ---- */
+.settings-body > .set-section:first-child .set-title-row,
+.settings-body > .set-section:first-child .set-title {
+  margin-top: 26px;
+}
+
+/* ---- 全局隐藏滚动条（保留滚动能力） ---- */
+* { scrollbar-width: none; }
+::-webkit-scrollbar { width: 0; height: 0; display: none; }

@@ -195,9 +195,6 @@ export function TerminalPane() {
   const connError = useStore((s) => s.connError);
   const switchTab = useStore((s) => s.switchTab);
   const closeTab = useStore((s) => s.closeTab);
-  const startDiagnosis = useStore((s) => s.startDiagnosis);
-  const diagState = useStore((s) => s.diagState);
-  const activeTab = tabs.find((t) => t.sessionId === activeTabId);
 
   return (
     <div className="terminal-pane">
@@ -252,18 +249,6 @@ export function TerminalPane() {
           tabs.map((t) => (
             <TerminalHost key={t.sessionId} sessionId={t.sessionId} active={t.sessionId === activeTabId} />
           ))
-        )}
-        {/* Floating diagnose button: docks as icon-only circle, expands on hover */}
-        {activeTab?.status === "connected" && (
-          <button
-            className={`term-fab ${diagState === "T1_ANALYZING" ? "busy" : ""}`}
-            disabled={diagState === "T1_ANALYZING"}
-            onClick={() => startDiagnosis("")}
-            title="一键诊断：发送最近命令的输出块 + 系统上下文给 AI 分析"
-          >
-            <Icon name="sparkles" size={15} className={diagState === "T1_ANALYZING" ? "spin" : ""} />
-            <span className="fab-label">{diagState === "T1_ANALYZING" ? "分析中" : "一键诊断"}</span>
-          </button>
         )}
       </div>
     </div>

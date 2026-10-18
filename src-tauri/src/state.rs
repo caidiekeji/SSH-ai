@@ -38,6 +38,8 @@ pub struct PromptEntry {
     pub for_diag: bool,
     #[serde(default)]
     pub for_chat: bool,
+    #[serde(default)]
+    pub for_agent: bool,
 }
 
 /// Global app settings (non-sensitive). `prompts` is the prompt library;
@@ -176,6 +178,24 @@ impl AppState {
     /// Custom prompt for chat mode (same join rule, 对话 flag).
     pub fn chat_prompt(&self) -> Option<String> {
         Self::join_prompts(&self.settings.lock().unwrap_or_else(|e| e.into_inner()).prompts, false)
+    }
+
+    /// Custom style directive for Agent mode (joined onto the built-in
+    /// agent schema prompt as 用户偏好; the JSON schema stays authoritative).
+    pub fn agent_prompt(&self) -> Option<String> {
+        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let joined: Vec<&str> = s
+            .prompts
+            .iter()
+            .filter(|p| p.for_agent)
+            .map(|p| p.content.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined.join("\n\n").chars().take(1000).collect())
+        }
     }
 
     fn join_prompts(prompts: &[PromptEntry], for_diag: bool) -> Option<String> {
