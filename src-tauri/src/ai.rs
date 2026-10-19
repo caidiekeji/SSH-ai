@@ -252,10 +252,10 @@ pub async fn run_diagnosis(
     on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
 ) -> Result<DiagnosisResult, crate::provider::error::ProviderError> {
     let messages = build_messages(req);
-    let (text, _complete) = provider
+    let (text, complete) = provider
         .chat_stream(messages, ChatOptions::default(), on_chunk)
         .await?;
-    Ok(parse_response(&text, false))
+    Ok(parse_response(&text, !complete)) // PRD §3.3: surface truncation
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ pub async fn run_chat(
         role: "user".into(),
         content: question.into(),
     });
-    let (text, _complete) = provider
+    let (text, complete) = provider
         .chat_stream(messages, ChatOptions::default(), on_chunk)
         .await?;
     Ok(text)
@@ -388,7 +388,15 @@ pub fn parse_agent_response_obj(raw: &str) -> Result<AgentStepOut, String> {
             ))
         }
     };
-    serde_json::from_str::<AgentStepOut>(json).map_err(|e| format!("Agent JSON 解析失败: {e}"))
+    serde_json::from_str::<AgentStepOut>(json)
+        .map(|mut out| {
+            // PRD §4.1 (defense in depth): agent commands must be single-line.
+            if let Some(c) = out.command.as_mut() {
+                *c = c.replace(['\r', '\n'], " ").trim().to_string();
+            }
+            out
+        })
+        .map_err(|e| format!("Agent JSON 解析失败: {e}"))
 }
 
 /// Plan the next agent step from goal + executed steps (+ live system info
@@ -450,7 +458,7 @@ pub async fn run_agent_step(
             content: user,
         },
     ];
-    let (text, _complete) = provider
+    let (text, complete) = provider
         .chat_stream(messages, ChatOptions::default(), &mut |_| {})
         .await?;
     parse_agent_response_obj(&text).map_err(crate::provider::error::ProviderError::Config)
