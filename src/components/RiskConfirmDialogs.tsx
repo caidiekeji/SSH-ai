@@ -2,7 +2,7 @@
 // YELLOW: confirm insert. RED: checkbox + insert; one-click EXECUTE is
 // never offered at any level.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { Icon } from "./Icon";
 
@@ -12,6 +12,13 @@ export function RiskConfirmDialogs() {
   const confirm = useStore((s) => s.confirmPrefill);
   const cancel = useStore((s) => s.cancelPrefill);
   const [checked, setChecked] = useState(false);
+
+  // Reset the red-level ack whenever a NEW pending command arrives (or the
+  // dialog closes): a checkbox ticked for command A must never authorize
+  // command B after a cancel.
+  useEffect(() => {
+    setChecked(false);
+  }, [pending]);
 
   if (!pending || !["T3_CONFIRM_YELLOW", "T3_CONFIRM_RED"].includes(diagState)) return null;
 
