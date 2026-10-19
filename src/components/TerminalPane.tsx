@@ -131,12 +131,16 @@ function TerminalHost({ sessionId, active }: { sessionId: number; active: boolea
     };
     hostRef.current.addEventListener("wheel", onWheel, { passive: false });
     // 右键菜单：选中文本时拦截默认菜单，弹"交给 AI"操作。
+    // Menu is ~200x78px; clamp the position so it never overflows the pane.
     const onCtx = (e: MouseEvent) => {
       const sel = term.getSelection();
       if (!sel || !sel.trim()) return;
       e.preventDefault();
-      const rect = hostRef.current!.getBoundingClientRect();
-      setCtxMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, text: sel.slice(0, 3000) });
+      const host = hostRef.current!;
+      const rect = host.getBoundingClientRect();
+      const x = Math.max(0, Math.min(e.clientX - rect.left, host.clientWidth - 200));
+      const y = Math.max(0, Math.min(e.clientY - rect.top, host.clientHeight - 78));
+      setCtxMenu({ x, y, text: sel.slice(0, 3000) });
     };
     hostRef.current.addEventListener("contextmenu", onCtx);
     const onSel = () => setCtxMenu(null);
