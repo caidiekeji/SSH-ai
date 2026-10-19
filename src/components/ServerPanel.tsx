@@ -44,6 +44,9 @@ export function ServerPanel() {
   const [op, setOp] = useState<{ title: string; danger: boolean; detail: string; run: () => Promise<void> } | null>(null);
   const [preview, setPreview] = useState<{ name: string; text: string } | null>(null);
   const [opBusy, setOpBusy] = useState(false);
+  // Text-input dialog state (WebView2 does NOT support window.prompt —
+  // a custom modal is required for mkdir / rename name entry).
+  const [ask, setAsk] = useState<{ title: string; label: string; value: string; onOk: (v: string) => void } | null>(null);
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -157,17 +160,21 @@ export function ServerPanel() {
   };
   const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
-  const mkdir = async () => {
-    const name = window.prompt("新文件夹名称：");
-    if (!name) return;
-    setOp({
+  const mkdir = () => {
+    setAsk({
       title: "新建文件夹",
-      danger: false,
-      detail: `mkdir -p ${q(name)} （位于 ${files.path}）`,
-      run: async () => {
-        await runOp(`cd ${q(files.path)} && mkdir -p ${q(name)}`);
-        await listDir(files.path);
-      },
+      label: "新文件夹名称（位于当前目录）",
+      value: "",
+      onOk: (name) =>
+        setOp({
+          title: "新建文件夹",
+          danger: false,
+          detail: `mkdir -p ${q(name)} （位于 ${files.path}）`,
+          run: async () => {
+            await runOp(`cd ${q(files.path)} && mkdir -p ${q(name)}`);
+            await listDir(files.path);
+          },
+        }),
     });
   };
 
@@ -183,15 +190,21 @@ export function ServerPanel() {
     });
 
   const doRename = (e: FileEntry) => {
-    const next = window.prompt("重命名为：", e.name);
-    if (!next || next === e.name) return;
-    setOp({
+    setAsk({
       title: "重命名",
-      danger: false,
-      detail: `mv -- ${q(e.name)} ${q(next)}（位于 ${files.path}）`,
-      run: async () => {
-        await runOp(`cd ${q(files.path)} && mv -- ${q(e.name)} ${q(next)}`);
-        await listDir(files.path);
+      label: `将「${e.name}」重命名为`,
+      value: e.name,
+      onOk: (next) => {
+        if (!next || next === e.name) return;
+        setOp({
+          title: "重命名",
+          danger: false,
+          detail: `mv -- ${q(e.name)} ${q(next)}（位于 ${files.path}）`,
+          run: async () => {
+            await runOp(`cd ${q(files.path)} && mv -- ${q(e.name)} ${q(next)}`);
+            await listDir(files.path);
+          },
+        });
       },
     });
   };
@@ -499,6 +512,45 @@ export function ServerPanel() {
               <button onClick={() => setShowAdd(false)}>取消</button>
               <button className="primary" disabled={!form.host || !form.username} onClick={quickConnect}>
                 连接
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- text input dialog (mkdir / rename; WebView2 has no window.prompt) ---- */}
+      {ask && (
+        <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && setAsk(null)}>
+          <div className="modal modal-sm">
+            <h2>{ask.title}</h2>
+            <div className="sub">{ask.label}</div>
+            <input
+              autoFocus
+              value={ask.value}
+              onChange={(e) => setAsk({ ...ask, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && ask.value.trim()) {
+                  const ok = ask.onOk;
+                  setAsk(null);
+                  ok(ask.value.trim());
+                } else if (e.key === "Escape") {
+                  setAsk(null);
+                }
+              }}
+              spellCheck={false}
+            />
+            <div className="modal-foot">
+              <button onClick={() => setAsk(null)}>取消</button>
+              <button
+                className="primary"
+                disabled={!ask.value.trim()}
+                onClick={() => {
+                  const ok = ask.onOk;
+                  setAsk(null);
+                  ok(ask.value.trim());
+                }}
+              >
+                确定
               </button>
             </div>
           </div>
