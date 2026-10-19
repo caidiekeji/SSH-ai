@@ -84,7 +84,7 @@ fn handle_request(mut request: tiny_http::Request, app: &tauri::AppHandle) -> Re
     let authorized = !token.is_empty()
         && request.headers().iter().any(|h| {
             h.field.as_str().as_str().eq_ignore_ascii_case("authorization")
-                && h.value.as_str() == format!("Bearer {token}")
+                && ct_eq(h.value.as_str(), &format!("Bearer {token}"))
         });
     if !authorized {
         respond_json(
@@ -317,7 +317,9 @@ async fn run_tool(app: &tauri::AppHandle, name: &str, args: &Value) -> Result<St
         "exec_command" => {
             let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;
             let command = args.get("command").and_then(|v| v.as_str()).ok_or("缺少 command")?.to_string();
-            crate::commands::exec_oneshot(st, session_id, command, None).await
+            // No user_ack: the execution-layer gate in exec_oneshot allows
+            // only GREEN (read-only) commands for external MCP callers.
+            crate::commands::exec_oneshot(st, session_id, command, None, None).await
         }
         "screen_tail" => {
             let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;
@@ -343,7 +345,7 @@ async fn run_tool(app: &tauri::AppHandle, name: &str, args: &Value) -> Result<St
         }
         "diagnose" => {
             let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;
-            let payload = crate::commands::ai_diagnose(st, app.clone(), session_id, String::new()).await?;
+            let payload = crate::commands::ai_diagnose(st, app.clone(), session_id, String::new(), None).await?;
             Ok(serde_json::to_string_pretty(&payload).unwrap_or_default())
         }
         "disconnect" => {
@@ -372,4 +374,12 @@ async fn run_tool(app: &tauri::AppHandle, name: &str, args: &Value) -> Result<St
         }
         other => Err(format!("未知工具: {other}")),
     }
+}
+
+/// Constant-time string equality (timing-safe token / fingerprint checks).
+fn ct_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
