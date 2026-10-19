@@ -459,15 +459,20 @@ pub async fn ai_diagnose(
     app: tauri::AppHandle,
     session_id: u64,
     question: String,
+    profile_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     // Resolve the active profile + key inside a scoped block so the
     // std::sync::MutexGuard is provably gone before the first await.
     let (profile, key) = {
         let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
-        let profile = profiles
-            .last()
-            .cloned()
-            .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+        // Honor the user's active-profile selection (UI switcher); fall back
+        // to the most recent profile only when no id is provided/matched.
+        let profile = match profile_id.as_deref() {
+            Some(id) if !id.is_empty() => profiles.iter().find(|p| p.id == id).cloned(),
+            _ => None,
+        }
+        .or_else(|| profiles.last().cloned())
+        .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
         let key = resolve_key(&state, &profile.id, None)?;
         (profile, key)
     };
@@ -570,13 +575,18 @@ pub async fn agent_step(
     goal: String,
     steps: Vec<AgentStepIn>,
     require_verification: Option<bool>,
+    profile_id: Option<String>,
 ) -> Result<crate::ai::AgentStepOut, String> {
     let (profile, key) = {
         let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
-        let profile = profiles
-            .last()
-            .cloned()
-            .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+        // Honor the user's active-profile selection (UI switcher); fall back
+        // to the most recent profile only when no id is provided/matched.
+        let profile = match profile_id.as_deref() {
+            Some(id) if !id.is_empty() => profiles.iter().find(|p| p.id == id).cloned(),
+            _ => None,
+        }
+        .or_else(|| profiles.last().cloned())
+        .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
         let key = resolve_key(&state, &profile.id, None)?;
         (profile, key)
     };
@@ -795,8 +805,12 @@ pub fn save_agent_log(
         "goal": goal,
         "steps": steps,
     });
-    std::fs::write(&file, serde_json::to_string_pretty(&payload).unwrap_or_default())
-        .map_err(|e| e.to_string())?;
+    // HC-02: on-disk logs are sanitized (Bearer/PEM/key-like strings
+    // redacted) — step outputs can echo environment content with secrets.
+    let body = crate::keyring_store::sanitize_log(
+        &serde_json::to_string_pretty(&payload).unwrap_or_default(),
+    );
+    std::fs::write(&file, body).map_err(|e| e.to_string())?;
     Ok(file.display().to_string())
 }
 
@@ -903,13 +917,18 @@ pub async fn ai_chat(
     app: tauri::AppHandle,
     history: Vec<ChatTurn>,
     question: String,
+    profile_id: Option<String>,
 ) -> Result<String, String> {
     let (profile, key) = {
         let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
-        let profile = profiles
-            .last()
-            .cloned()
-            .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+        // Honor the user's active-profile selection (UI switcher); fall back
+        // to the most recent profile only when no id is provided/matched.
+        let profile = match profile_id.as_deref() {
+            Some(id) if !id.is_empty() => profiles.iter().find(|p| p.id == id).cloned(),
+            _ => None,
+        }
+        .or_else(|| profiles.last().cloned())
+        .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
         let key = resolve_key(&state, &profile.id, None)?;
         (profile, key)
     };
@@ -1006,10 +1025,36 @@ pub async fn exec_oneshot(
     session_id: u64,
     command: String,
     // Optional per-call timeout (5..=300 s). Default 15 s for dashboard
-    // probes; the Agent loop passes 60 s for real ops commands.
+    // probes; the Agent loop passes the configured exec timeout.
     timeout_secs: Option<u64>,
+    // None (or "green") => only GREEN commands may run. "yellow" => the
+    // caller has user authorization for a YELLOW (write) command.
+    user_ack: Option<String>,
 ) -> Result<String, String> {
+    use crate::safety::risk::RiskLevel;
     use russh::ChannelMsg;
+
+    // ---- execution-layer gate: the SINGLE choke point for every non-PTY
+    // exec (dashboard probes, file ops, agent steps, MCP exec_command).
+    // Every command is re-graded HERE regardless of what the caller checked.
+    let ack = user_ack.as_deref().unwrap_or("none");
+    let assessment = state.risk.assess(&command, "");
+    match assessment.level {
+        RiskLevel::Red => {
+            return Err(format!(
+                "已拒绝执行：命中黑名单规则「{}」——{}。该命令风险过高，如确需执行请在终端中手动输入。",
+                assessment.rule, assessment.reason
+            ))
+        }
+        RiskLevel::Yellow if ack != "yellow" => {
+            return Err(format!(
+                "已拒绝执行：该命令为写操作（{}）。请通过 Agent 确认流程执行，或检查命令是否应包含写操作。",
+                assessment.reason
+            ))
+        }
+        _ => {}
+    }
+
     let timeout = timeout_secs.unwrap_or(15).clamp(5, 300);
     // Clone the Arc'd cell out of the map, then drop the std guard BEFORE
     // any await so the future stays Send.
@@ -1035,9 +1080,20 @@ pub async fn exec_oneshot(
         ch
     };
 
-    let mut out = Vec::new();
+    // Wall-clock timeout (a streaming `tail -f` must NOT reset the timer on
+    // every frame) and a hard output cap (unbounded growth protection).
+    const MAX_OUT: usize = 512 * 1024;
+    let started = std::time::Instant::now();
+    let mut out: Vec<u8> = Vec::new();
+    let mut hit_limit = false;
     loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(timeout), ch.wait()).await {
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= timeout || out.len() >= MAX_OUT {
+            hit_limit = true;
+            break;
+        }
+        let remain = timeout - elapsed;
+        match tokio::time::timeout(std::time::Duration::from_secs(remain), ch.wait()).await {
             Ok(Some(ChannelMsg::Data { ref data })) => out.extend_from_slice(data),
             Ok(Some(ChannelMsg::ExtendedData { ref data, .. })) => out.extend_from_slice(data),
             // ExitStatus/Eof/Close/None: output complete.
@@ -1046,8 +1102,22 @@ pub async fn exec_oneshot(
             | Ok(Some(ChannelMsg::Close))
             | Ok(None) => break,
             Ok(Some(_)) => {}
-            Err(_) => break, // 15s timeout guard
+            Err(_) => {
+                // Wall-clock timeout: close the channel, don't leak it.
+                hit_limit = true;
+                break;
+            }
         }
     }
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    if hit_limit {
+        let _ = ch.close().await;
+    }
+    if out.len() >= MAX_OUT {
+        out.truncate(MAX_OUT);
+    }
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    if hit_limit {
+        text.push_str("\n…（输出已截断：超过 512KB 或超时）");
+    }
+    Ok(text)
 }
