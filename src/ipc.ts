@@ -76,15 +76,16 @@ export const ipc = {
   removeWhitelist: (command: string) => invoke<void>("remove_whitelist", { command }),
 
   // ---- Diagnosis ----
-  aiDiagnose: (sessionId: number, question: string) =>
+  aiDiagnose: (sessionId: number, question: string, profileId?: string | null) =>
     invoke<{ result: DiagnosisResult; provider: string; model: string }>("ai_diagnose", {
       sessionId,
       question,
+      profileId: profileId ?? null,
     }),
 
   // ---- Chat mode (multi-turn, no terminal context) ----
-  aiChat: (history: { role: string; content: string }[], question: string) =>
-    invoke<string>("ai_chat", { history, question }),
+  aiChat: (history: { role: string; content: string }[], question: string, profileId?: string | null) =>
+    invoke<string>("ai_chat", { history, question, profileId: profileId ?? null }),
 
   // ---- Agent mode (automated ops loop) ----
   agentStep: (
@@ -92,6 +93,7 @@ export const ipc = {
     goal: string,
     steps: { command: string; output: string }[],
     requireVerification?: boolean,
+    profileId?: string | null,
   ) =>
     invoke<{
       action: "command" | "verify" | "done" | "giveup";
@@ -102,7 +104,7 @@ export const ipc = {
       reason?: string;
       expect?: string;
       riskHint?: string;
-    }>("agent_step", { sessionId, goal, steps, requireVerification }),
+    }>("agent_step", { sessionId, goal, steps, requireVerification, profileId: profileId ?? null }),
   getAgentConfig: () => invoke<{ autoGreen: boolean; agentExecTimeout: number }>("get_agent_config"),
   setAgentConfig: (autoGreen: boolean, agentExecTimeout: number) =>
     invoke<void>("set_agent_config", { autoGreen, agentExecTimeout }),
@@ -132,8 +134,15 @@ export const ipc = {
   setDiagnosisDepth: (depth: number) => invoke<void>("set_diagnosis_depth", { depth }),
 
   // ---- Server dashboard (user-initiated exec on a separate channel) ----
-  execOneshot: (sessionId: number, command: string, timeoutSecs?: number) =>
-    invoke<string>("exec_oneshot", { sessionId, command, timeoutSecs }),
+  // userAck: "yellow" marks a user-authorized write command (the Rust
+  // execution layer re-grades EVERY command as the final authority; RED is
+  // always refused). Omitting it allows only GREEN (read-only) commands.
+  execOneshot: (
+    sessionId: number,
+    command: string,
+    timeoutSecs?: number,
+    userAck?: "green" | "yellow",
+  ) => invoke<string>("exec_oneshot", { sessionId, command, timeoutSecs, userAck: userAck ?? null }),
 
   // ---- SFTP (user-initiated file transfer) ----
   sftpDownload: (sessionId: number, remotePath: string) =>
