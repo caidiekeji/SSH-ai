@@ -104,9 +104,11 @@ impl AnsiNormalizer {
 
 /// Assemble plain text into lines, handling CR overwrite within a line and
 /// CRLF (which must count as a single newline, not clear + newline).
+/// Consuming design: `feed`/`flush_partial` RETURN completed lines; no
+/// internal archive is kept (the old self.lines copy grew without bound
+/// because nothing ever called take_lines — the screen buffer owns history).
 pub struct LineAssembler {
     current: Vec<u8>,
-    lines: Vec<String>,
     pending_cr: bool,
 }
 
@@ -120,7 +122,6 @@ impl LineAssembler {
     pub fn new() -> Self {
         Self {
             current: Vec::new(),
-            lines: Vec::new(),
             pending_cr: false,
         }
     }
@@ -146,7 +147,6 @@ impl LineAssembler {
                 }
             }
         }
-        self.lines.extend(completed.iter().cloned());
         completed
     }
 
@@ -157,18 +157,10 @@ impl LineAssembler {
         } else {
             let s = String::from_utf8_lossy(&self.current).into_owned();
             self.current.clear();
-            self.lines.push(s.clone());
             Some(s)
         }
     }
 
-    pub fn lines(&self) -> &[String] {
-        &self.lines
-    }
-
-    pub fn take_lines(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.lines)
-    }
 }
 
 #[cfg(test)]
