@@ -103,8 +103,9 @@ export const ipc = {
       expect?: string;
       riskHint?: string;
     }>("agent_step", { sessionId, goal, steps, requireVerification }),
-  getAgentConfig: () => invoke<{ autoGreen: boolean }>("get_agent_config"),
-  setAgentConfig: (autoGreen: boolean) => invoke<void>("set_agent_config", { autoGreen }),
+  getAgentConfig: () => invoke<{ autoGreen: boolean; agentExecTimeout: number }>("get_agent_config"),
+  setAgentConfig: (autoGreen: boolean, agentExecTimeout: number) =>
+    invoke<void>("set_agent_config", { autoGreen, agentExecTimeout }),
   saveAgentLog: (goal: string, status: string, steps: unknown) =>
     invoke<string>("save_agent_log", { goal, status, steps }).catch(() => ""),
 
