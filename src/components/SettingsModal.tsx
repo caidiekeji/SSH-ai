@@ -431,11 +431,31 @@ function AiAdvanced() {
     }
   };
 
-  // ---- agent auto-green ----
+  // ---- agent auto-green + exec timeout ----
   const [agentAutoGreen, setAgentAutoGreen] = useState(true);
+  const [agentTimeout, setAgentTimeout] = useState(60);
+  const [agentSaved, setAgentSaved] = useState(false);
   useEffect(() => {
-    ipc.getAgentConfig().then((c) => setAgentAutoGreen(c.autoGreen)).catch(() => {});
+    ipc
+      .getAgentConfig()
+      .then((c) => {
+        setAgentAutoGreen(c.autoGreen);
+        setAgentTimeout(c.agentExecTimeout);
+      })
+      .catch(() => {});
   }, []);
+
+  const saveAgentConfig = (autoGreen: boolean, timeout: number) => {
+    const t = Math.min(300, Math.max(5, Math.round(timeout) || 60));
+    setAgentTimeout(t);
+    ipc
+      .setAgentConfig(autoGreen, t)
+      .then(() => {
+        setAgentSaved(true);
+        setTimeout(() => setAgentSaved(false), 2000);
+      })
+      .catch((err) => setError(String(err)));
+  };
 
   return (
     <>
@@ -479,13 +499,36 @@ function AiAdvanced() {
             checked={agentAutoGreen}
             onChange={(e) => {
               setAgentAutoGreen(e.target.checked);
-              ipc.setAgentConfig(e.target.checked).catch((err) => setError(String(err)));
+              saveAgentConfig(e.target.checked, agentTimeout);
             }}
           />
           自动执行低风险（绿色）命令，黄色/红色始终需要确认
         </label>
+        <div className="depth-row">
+          <span className="depth-label">单条命令超时</span>
+          <div className="depth-stepper">
+            <button
+              className="depth-btn"
+              disabled={agentTimeout <= 5}
+              onClick={() => saveAgentConfig(agentAutoGreen, agentTimeout - 5)}
+              title="减少 5 秒"
+            >
+              −
+            </button>
+            <span className="depth-value">{agentTimeout}s</span>
+            <button
+              className="depth-btn"
+              disabled={agentTimeout >= 300}
+              onClick={() => saveAgentConfig(agentAutoGreen, agentTimeout + 5)}
+              title="增加 5 秒"
+            >
+              +
+            </button>
+          </div>
+          <span className={`depth-saved ${agentSaved ? "show" : ""}`}>已保存</span>
+        </div>
         <div className="dim-note" style={{ marginTop: 7 }}>
-          Agent 模式下 AI 逐步规划命令并自动观察输出；所有命令先经本地风险分级，高危操作永远弹出确认。关闭后每条命令都要手动批准。
+          Agent 模式下 AI 逐步规划命令并自动观察输出；所有命令先经本地风险分级，高危操作永远弹出确认。关闭后每条命令都要手动批准。单条命令超时范围 5~300 秒（默认 60 秒）。
         </div>
       </section>
 
