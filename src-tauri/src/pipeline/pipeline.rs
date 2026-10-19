@@ -100,6 +100,8 @@ pub struct Pipeline {
     active_block: Option<ActiveBlock>,
     pub blocks: Vec<ErrorBlock>,
     pub system_info: SystemInfo,
+    /// True once the (single, connection-time) probe line has been consumed.
+    pub system_info_probed: bool,
     /// PRD §2.4 stage 3: prompt segmentation is heuristic; we record whether
     /// a structured prompt was detected or we degraded to recent-N-lines.
     pub prompt_parse: &'static str,
@@ -121,6 +123,7 @@ impl Pipeline {
             active_block: None,
             blocks: Vec::new(),
             system_info: SystemInfo::default(),
+            system_info_probed: false,
             prompt_parse: "fallback",
             block_counter: 0,
         }
@@ -150,8 +153,15 @@ impl Pipeline {
 
     fn process_line(&mut self, line: &str, events: &mut Vec<PipelineEvent>) {
         // System probe line: parse and suppress from screen state.
+        // Trust-boundary hardening: accept the probe ONLY once, right after
+        // the connection (while system_info is still the default). Anything
+        // a remote process prints later must NOT overwrite the host facts
+        // that ground AI prompts (prompt-injection surface).
         if let Some(rest) = line.strip_prefix("__AISA_PROBE__") {
-            self.parse_probe(rest);
+            if !self.system_info_probed {
+                self.system_info_probed = true;
+                self.parse_probe(rest);
+            }
             return;
         }
 
