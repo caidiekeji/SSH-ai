@@ -17,12 +17,20 @@ export function AiSidebar() {
   const sessionId = useStore((s) => s.sessionId);
   const connStatus = useStore((s) => s.connStatus);
   const chatHistory = useStore((s) => s.chatHistory);
+  const chatBusy = useStore((s) => s.chatBusy);
   const listRef = useRef<HTMLDivElement>(null);
+  // Only auto-scroll while the user is "stuck" near the bottom; scrolling up
+  // to read history must never be yanked back down.
+  const stickRef = useRef(true);
 
-  // Auto-scroll to the newest message.
+  // Follow the newest content (instant while streaming to avoid smooth-scroll
+  // jitter from per-chunk updates; smooth for discrete message arrivals).
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
-  }, [cards, diagState, chatHistory]);
+    const el = listRef.current;
+    if (!el || !stickRef.current) return;
+    const streaming = diagState === "T1_ANALYZING" || chatBusy;
+    el.scrollTo({ top: el.scrollHeight, behavior: streaming ? "instant" : "smooth" });
+  }, [cards, diagState, chatHistory, chatBusy]);
 
   const analyzing = diagState === "T1_ANALYZING";
 
@@ -35,7 +43,10 @@ export function AiSidebar() {
         <ModelSwitcher />
       </div>
 
-      <div className="chat-list" ref={listRef}>
+      <div className="chat-list" ref={listRef} onScroll={() => {
+        const el = listRef.current;
+        if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      }}>
         {cards.length === 0 && chatHistory.length === 0 && (
           <div className="chat-empty">
             <Icon name="sparkles" size={30} className="ai-ico big" />
@@ -244,7 +255,7 @@ function ChatMessage({ card }: { card: Card }) {
             <Icon name="sparkles" size={14} className="ai-ico" /> 正在分析<span className="dots">…</span>
           </div>
           <div className="raw-text stream md-scroll">
-            <Markdown text={card.streamingText || "等待模型响应…"} />
+            <Markdown text={card.streamingText || "等待模型响应…"} live />
           </div>
         </div>
       </div>
