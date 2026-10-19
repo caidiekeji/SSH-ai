@@ -113,7 +113,9 @@ interface Store {
   agentApproval: { command: string; description: string; level: string } | null;
   agentError: string;
   _agentResolve: ((ok: boolean) => void) | null;
-  agentLoop: () => Promise<void>;
+  /** Run token: a fresh startAgent invalidates any previous loop. */
+  _agentRunId: number;
+  agentLoop: (runId: number) => Promise<void>;
   startAgent: (goal: string) => void;
   stopAgent: () => void;
   resolveAgent: (ok: boolean) => void;
@@ -138,6 +140,11 @@ let cardSeq = 0;
 const nextCardId = () => `card-${Date.now()}-${cardSeq++}`;
 let lastQuestion = "";
 let diagRunning = false;
+
+// Agent run token: incremented on every startAgent; a loop whose token no
+// longer matches the current one exits instead of resurrecting (stop -> start
+// race previously let the OLD and NEW loops run in parallel).
+let agentRunSeq = 0;
 
 // Previous raw byte/sector counters (for computing per-second rates).
 let lastIoRaw: { sessionId: number; rx: number; tx: number; dr: number; dw: number; t: number } | null = null;
@@ -502,19 +509,33 @@ export const useStore = create<Store>((set, get) => ({
   agentApproval: null,
   agentError: "",
   _agentResolve: null as ((ok: boolean) => void) | null,
+  _agentRunId: 0,
   startAgent: (goal) => {
     const st = get();
     if (!st.sessionId) return set({ diagError: "请先连接主机" });
     if (st.agentStatus === "running" || st.agentStatus === "waiting") return;
-    set({ agentStatus: "running", agentGoal: goal, agentSteps: [], agentApproval: null, agentError: "" });
-    void get().agentLoop();
+    const runId = ++agentRunSeq;
+    set({
+      agentStatus: "running",
+      agentGoal: goal,
+      agentSteps: [],
+      agentApproval: null,
+      agentError: "",
+      _agentRunId: runId,
+    });
+    void get().agentLoop(runId);
   },
-  agentLoop: async () => {
+  agentLoop: async (runId: number) => {
     const MAX_STEPS = 12;
     let verifyAsked = false; // 是否已要求 AI 补验证（防无限验证循环）
+    // A loop whose run token was superseded (stop -> new start) must exit,
+    // not resume and double-execute steps alongside the new loop.
+    const alive = () =>
+      get()._agentRunId === runId && (get().agentStatus === "running" || get().agentStatus === "waiting");
     // Per-command exec timeout from settings (5..=300s, default 60).
     const cfg = await ipc.getAgentConfig().catch(() => null);
     const execTimeout = Math.min(300, Math.max(5, cfg?.agentExecTimeout ?? 60));
+    const profileId = get().activeProfileId;
     // 审计：任务结束时落盘（data_dir/agent_logs/），失败静默。
     const audit = (s: string) => {
       const st = get();
@@ -535,19 +556,29 @@ export const useStore = create<Store>((set, get) => ({
             st.agentGoal,
             st.agentSteps.map((s) => ({ command: s.command, output: s.output })),
             requireVerification,
+            profileId,
           ),
         );
       } catch (e) {
-        set({ agentStatus: "failed", agentError: String(e) });
+        if (alive()) set({ agentStatus: "failed", agentError: String(e) });
         return;
       }
-      if (get().agentStatus !== "running") return;
+      if (!alive()) return;
 
       if (step.action === "done") {
-        // P0 加固：done 必须有 verify 证据；否则强制 AI 补一条验证命令。
-        if (!hasVerify && !verifyAsked) {
-          verifyAsked = true;
-          continue;
+        // P0 加固：done 必须有 verify 证据。第一次强令 AI 补验证；若它再次
+        // 返回 done 仍无验证，判定失败而非放行（旧逻辑放行 = 可绕过）。
+        if (!hasVerify) {
+          if (!verifyAsked) {
+            verifyAsked = true;
+            continue;
+          }
+          set({
+            agentStatus: "failed",
+            agentError: "AI 宣称完成但未提供验证结果，任务中止。请人工核对目标状态。",
+          });
+          audit("failed");
+          return;
         }
         set({ agentStatus: "done" });
         audit("done");
@@ -565,9 +596,15 @@ export const useStore = create<Store>((set, get) => ({
       }
       const kind: "exec" | "verify" = step.action === "verify" ? "verify" : "exec";
 
-      // 2. Local risk grading (AI hint NOT trusted — PRD §5.5).
-      const assessment = await ipc.assessRisk(command, step.riskHint || "read");
-      if (get().agentStatus !== "running") return;
+      // 2. Local risk grading (AI hint NOT trusted — PRD §5.5). A grader
+      // failure must NOT hang the loop unhandled — degrade to YELLOW.
+      let assessment: RiskAssessment;
+      try {
+        assessment = await ipc.assessRisk(command, step.riskHint || "read");
+      } catch (e) {
+        assessment = { level: "yellow", rule: "grader-error", reason: "本地分级器异常，按中风险处理" };
+      }
+      if (!alive()) return;
       const autoGreen = cfg?.autoGreen ?? true;
       let ok = assessment.level === "green" && autoGreen;
 
