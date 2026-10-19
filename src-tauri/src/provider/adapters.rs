@@ -48,8 +48,10 @@ pub trait LLMProvider: Send + Sync {
 fn client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(timeout)
-        // HC-04: direct connection only. No proxy env overrides, no redirects
-        // to foreign hosts are followed beyond default (reqwest default: 10).
+        // HC-04: direct connection only — no system/env proxy (an API key
+        // must never transit a proxy we don't control) and no redirects.
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .expect("reqwest client")
 }
@@ -62,6 +64,8 @@ fn stream_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .tcp_keepalive(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .expect("reqwest client")
 }
