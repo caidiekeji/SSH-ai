@@ -64,6 +64,9 @@ pub struct AppSettings {
     /// Agent mode: auto-execute green (low-risk) commands without approval.
     #[serde(default = "default_true")]
     pub agent_auto_green: bool,
+    /// Agent mode: per-command exec timeout in seconds (5..=300).
+    #[serde(default = "default_agent_exec_timeout")]
+    pub agent_exec_timeout: u64,
     /// MCP server (for external IDEs): enable flag, bind port, bearer token.
     #[serde(default)]
     pub mcp_enabled: bool,
@@ -79,6 +82,10 @@ fn default_diagnosis_depth() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_agent_exec_timeout() -> u64 {
+    60
 }
 
 fn default_mcp_port() -> u16 {
