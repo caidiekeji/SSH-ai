@@ -146,7 +146,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 
 .app {
   display: grid;
-  grid-template-rows: 46px 1fr 46px;
+  grid-template-rows: 46px 1fr;
   height: 100%;
 }
 
