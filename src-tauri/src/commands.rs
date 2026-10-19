@@ -814,6 +814,7 @@ fn chrono_like_timestamp() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
     pub auto_green: bool,
+    pub agent_exec_timeout: u64,
 }
 
 #[tauri::command]
@@ -821,14 +822,20 @@ pub fn get_agent_config(state: State<'_, AppState>) -> AgentConfig {
     let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
     AgentConfig {
         auto_green: s.agent_auto_green,
+        agent_exec_timeout: s.agent_exec_timeout,
     }
 }
 
 #[tauri::command]
-pub fn set_agent_config(state: State<'_, AppState>, auto_green: bool) -> Result<(), String> {
+pub fn set_agent_config(
+    state: State<'_, AppState>,
+    auto_green: bool,
+    agent_exec_timeout: u64,
+) -> Result<(), String> {
     {
         let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         s.agent_auto_green = auto_green;
+        s.agent_exec_timeout = agent_exec_timeout.clamp(5, 300);
     }
     state.save_settings()
 }
