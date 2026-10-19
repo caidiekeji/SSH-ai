@@ -381,9 +381,13 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   closeCard: (id) => {
-    set((s) => ({ cards: s.cards.filter((c) => c.id !== id) }));
-    // Closing the result card returns to idle (T2 → T0).
-    set({ diagState: "T0_IDLE" });
+    // Dismissing an old card must not clobber the state machine (a streaming
+    // or active result may still be in T1/T2); only return to idle when the
+    // last card is gone.
+    set((s) => {
+      const cards = s.cards.filter((c) => c.id !== id);
+      return { cards, ...(cards.length === 0 ? { diagState: "T0_IDLE" as DiagState } : {}) };
+    });
   },
 
   requestInsert: async (_cardId, command, hint) => {
@@ -508,6 +512,9 @@ export const useStore = create<Store>((set, get) => ({
   agentLoop: async () => {
     const MAX_STEPS = 12;
     let verifyAsked = false; // 是否已要求 AI 补验证（防无限验证循环）
+    // Per-command exec timeout from settings (5..=300s, default 60).
+    const cfg = await ipc.getAgentConfig().catch(() => null);
+    const execTimeout = Math.min(300, Math.max(5, cfg?.agentExecTimeout ?? 60));
     // 审计：任务结束时落盘（data_dir/agent_logs/），失败静默。
     const audit = (s: string) => {
       const st = get();
@@ -561,7 +568,7 @@ export const useStore = create<Store>((set, get) => ({
       // 2. Local risk grading (AI hint NOT trusted — PRD §5.5).
       const assessment = await ipc.assessRisk(command, step.riskHint || "read");
       if (get().agentStatus !== "running") return;
-      const autoGreen = await ipc.getAgentConfig().then((c) => c.autoGreen).catch(() => true);
+      const autoGreen = cfg?.autoGreen ?? true;
       let ok = assessment.level === "green" && autoGreen;
 
       // 3. Yellow/red (or auto-green off): wait for user approval.
@@ -579,10 +586,10 @@ export const useStore = create<Store>((set, get) => ({
         }
       }
 
-      // 4. Execute on the separate oneshot channel (60s for real ops commands).
+      // 4. Execute on the separate oneshot channel (timeout from settings).
       let output = "";
       try {
-        output = await ipc.execOneshot(st.sessionId, command, 60);
+        output = await ipc.execOneshot(st.sessionId, command, execTimeout);
       } catch (e) {
         set((s) => ({
           agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: String(e), risk: assessment.level, kind }],
