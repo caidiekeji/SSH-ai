@@ -19,6 +19,7 @@ const fmtSize = (n: number) => {
 export function ServerPanel() {
   const connections = useStore((s) => s.connections);
   const connStatus = useStore((s) => s.connStatus);
+  const connError = useStore((s) => s.connError);
   const sessionId = useStore((s) => s.sessionId);
   const activeHost = useStore((s) => s.activeHost);
   const serverInfo = useStore((s) => s.serverInfo);
@@ -331,7 +332,7 @@ export function ServerPanel() {
           断开当前连接
         </button>
       )}
-      {connStatus === "error" && <div className="error-text small-err">{useStore.getState().connError}</div>}
+      {connStatus === "error" && <div className="error-text small-err">{connError}</div>}
 
       {/* ---- server stats ---- */}
       {connected && (
