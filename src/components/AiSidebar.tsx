@@ -308,6 +308,9 @@ function ChatMessage({ card }: { card: Card }) {
     <div className="chat-msg">
       {card.question && <div className="bubble user">{card.question}</div>}
       <div className="dcard">
+        {r.incomplete && (
+          <div className="note-warn">模型输出被截断（未正常结束），结果可能不完整。可重试或更换模型。</div>
+        )}
         {/* ① 问题总结 */}
         <div className="dcard-block head">
           <span className="dcard-label">问题</span>
