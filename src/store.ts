@@ -264,7 +264,9 @@ export const useStore = create<Store>((set, get) => ({
       set((s) => ({
         tabs: s.tabs.map((t) =>
           t.sessionId === oldSessionId
-            ? { ...t, sessionId: res.sessionId, status: "connected" as ConnStatus, reconnects: n + 1 }
+            // Success resets the backoff counter: the limit is per-streak of
+            // failures, NOT cumulative across the tab's lifetime.
+            ? { ...t, sessionId: res.sessionId, status: "connected" as ConnStatus, reconnects: 0 }
             : t,
         ),
         activeTabId: s.activeTabId === oldSessionId ? res.sessionId : s.activeTabId,
