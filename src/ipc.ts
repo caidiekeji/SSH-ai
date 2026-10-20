@@ -96,13 +96,14 @@ export const ipc = {
     profileId?: string | null,
   ) =>
     invoke<{
-      action: "command" | "verify" | "done" | "giveup";
+      action: "command" | "verify" | "done" | "giveup" | "pty";
       command?: string;
       description?: string;
       reasoning?: string;
       summary?: string;
       reason?: string;
       expect?: string;
+      keys?: string;
       riskHint?: string;
     }>("agent_step", { sessionId, goal, steps, requireVerification, profileId: profileId ?? null }),
   getAgentConfig: () => invoke<{ autoGreen: boolean; agentExecTimeout: number }>("get_agent_config"),
@@ -143,6 +144,25 @@ export const ipc = {
     timeoutSecs?: number,
     userAck?: "green" | "yellow",
   ) => invoke<string>("exec_oneshot", { sessionId, command, timeoutSecs, userAck: userAck ?? null }),
+
+  // ---- Agent execution: PERSISTENT shell (cd/export survive across steps) ----
+  // Same execution-layer gate as execOneshot. Returns structured result:
+  // exitCode!=0 is DATA (AI self-corrects), not a thrown error; a thrown
+  // error means the gate refused or the channel is broken.
+  agentExec: (
+    sessionId: number,
+    command: string,
+    timeoutSecs?: number,
+    userAck?: "green" | "yellow",
+  ) =>
+    invoke<{ output: string; exitCode: number | null; timedOut: boolean; shellGone: boolean }>(
+      "agent_exec",
+      { sessionId, command, timeoutSecs, userAck: userAck ?? null },
+    ),
+
+  // Read terminal screen tail from the LOCAL screen model (no remote exec).
+  readScreenTail: (sessionId: number, lines?: number) =>
+    invoke<string>("read_screen_tail", { sessionId, lines }),
 
   // ---- SFTP (user-initiated file transfer) ----
   sftpDownload: (sessionId: number, remotePath: string) =>
