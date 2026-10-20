@@ -148,6 +148,10 @@ pub struct Session {
     pub write_tx: mpsc::Sender<PtyCmd>,
     pub handle: Arc<Mutex<Option<Handle<ClientHandler>>>>,
     pub pipeline: Arc<Mutex<Pipeline>>,
+    /// Persistent agent shell (one remote shell reused across agent steps so
+    /// cd/export survive). Slot holds the driver task's command sender; it is
+    /// cleared whenever the channel is poisoned (timeout / shell death).
+    pub agent_shell: Arc<Mutex<Option<mpsc::Sender<crate::agent_shell::ShellReq>>>>,
 }
 
 /// Connect and spawn the PTY bridge task. Returns the session record.
@@ -213,6 +217,7 @@ pub async fn connect(
         write_tx: write_tx.clone(),
         handle: Arc::new(Mutex::new(Some(handle))),
         pipeline: pipeline.clone(),
+        agent_shell: Arc::new(Mutex::new(None)),
     };
 
     // PTY bridge task: types fully inferred from channel_open_session.
