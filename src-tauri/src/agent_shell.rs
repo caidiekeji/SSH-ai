@@ -170,7 +170,7 @@ where
 /// Consumed silently — the first agent command never sees this noise.
 async fn run_init<S>(c: &mut russh::Channel<S>)
 where
-    S: Send + Sync + From<(russh::ChannelId, russh::ChannelMsg)>,
+    S: Send + Sync + 'static + From<(russh::ChannelId, russh::ChannelMsg)>,
 {
     const INIT: &str = "export PAGER=cat GIT_PAGER=cat AWS_PAGER='' TF_INPUT=0 DEBIAN_FRONTEND=noninteractive NO_COLOR=1; { . \"$HOME/.profile\"; . \"$HOME/.bashrc\"; } < /dev/null 2>/dev/null || true; set +e; printf '\\n\\001AISA_READY\\002\\n'";
     if c.data(INIT.as_bytes()).await.is_err() {
