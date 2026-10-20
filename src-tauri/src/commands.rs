@@ -1168,7 +1168,7 @@ pub async fn agent_exec(
                     .channel_open_session()
                     .await
                     .map_err(|e| format!("打开 Agent 执行通道失败: {e}"))?;
-                ch.request_shell()
+                ch.request_shell(true)
                     .await
                     .map_err(|e| format!("请求 Agent shell 失败: {e}"))?;
                 *slot = Some(crate::agent_shell::spawn_shell(ch));
