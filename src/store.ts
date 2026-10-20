@@ -624,9 +624,17 @@ export const useStore = create<Store>((set, get) => ({
       }
 
       // 4. Execute on the separate oneshot channel (timeout from settings).
+      // YELLOW only reaches here after the user clicked approve in step 3 —
+      // pass that authorization through, otherwise the Rust execution gate
+      // (ack=none → green-only) rejects every approved write command.
       let output = "";
       try {
-        output = await ipc.execOneshot(st.sessionId, command, execTimeout);
+        output = await ipc.execOneshot(
+          st.sessionId,
+          command,
+          execTimeout,
+          assessment.level === "yellow" ? "yellow" : undefined,
+        );
       } catch (e) {
         set((s) => ({
           agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: String(e), risk: assessment.level, kind }],
@@ -785,6 +793,10 @@ export const useStore = create<Store>((set, get) => ({
   runOp: async (command) => {
     const { sessionId } = get();
     if (!sessionId) throw new Error("未连接主机");
-    return ipc.execOneshot(sessionId, command);
+    // File-browser operations are triggered by an explicit user action in the
+    // UI (create/rename/delete/save/run) — that click is the authorization
+    // for YELLOW writes. The Rust execution gate still re-grades every
+    // command and unconditionally refuses RED.
+    return ipc.execOneshot(sessionId, command, undefined, "yellow");
   },
 }));
