@@ -476,6 +476,7 @@ function AgentCard() {
                 <span className="agent-step-no">{s.no}.</span>
                 <code className="agent-step-cmd">{s.command}</code>
                 {s.kind === "verify" && <span className="verify-badge">验证</span>}
+                {s.kind === "pty" && <span className="verify-badge">终端</span>}
               </div>
               {s.description && <div className="agent-step-desc">{s.description}</div>}
               {s.output && <pre className="agent-step-out">{s.output.split("\n").slice(-4).join("\n")}</pre>}
