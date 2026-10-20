@@ -194,8 +194,67 @@ fn read_rules() -> &'static Vec<Rule> {
             mk(r"^(echo|printf)\b[^>]*$"),
             mk(r"^git\s+(status|log|diff|show|branch|remote|blame)\b"),
             mk(r"^uname\b|^lsb_release\b|^cat\s+/etc/os-release\b"),
+            // Pure state navigation / byte shuffling — no side effects beyond
+            // the current (often one-shot) shell. Powers the built-in server
+            // dashboard and file browser probes.
+            mk(r"^(pwd|cd|nproc|cut|exit|true|false)\b"),
+            // `{ echo x; }` group fragments and the closing brace produced by
+            // quote-aware segment splitting; the leading word is still graded
+            // by its own whitelist rule above.
+            mk(r"^\{\s*(echo|printf)\b|^\}$"),
+            // Shell test(1) / `[ … ]` bracket test — comparison only,
+            // cannot write. `test` needs no closing bracket; `[` does.
+            mk(r"^test\b|^\[.*\]$"),
+            // awk is powerful enough to run commands — allowed only when the
+            // script shows no dangerous feature (see `awk_dangerous`), which
+            // the caller checks before consulting this whitelist.
+            mk(r"^awk\b"),
         ]
     })
+}
+
+/// True when EVERY redirect target in `cmd` is a sink — `/dev/null` or an fd
+/// duplicate (`2>&1`). Discarding output writes nothing, so this must not be
+/// graded as a file write (the probe commands rely on `2>/dev/null`).
+/// Returns `false` when there is no redirect at all (caller only uses this
+/// to excuse the redirect-write rule, so that never happens in practice).
+fn redirect_only_sinks(cmd: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r">>?\s*(\S+)").expect("valid redirect regex"));
+    let mut found = false;
+    for cap in re.captures_iter(cmd) {
+        found = true;
+        match cap.get(1).map(|m| m.as_str()) {
+            // `/dev/null` discards; `&1`/`&2` duplicate a stream. A bare
+            // `>2` would create a FILE named "2" — never excused.
+            Some("/dev/null") | Some("&1") | Some("&2") => {}
+            _ => return false,
+        }
+    }
+    found
+}
+
+/// awk can execute commands (`system`, `getline cmd`), write files (redirect)
+/// and pipe to programs (`|`). A script containing any of those features is
+/// NOT read-only and must fall through to the conservative YELLOW default.
+/// Pure text processing (`awk 'NR==2{print $1}'`) stays GREEN.
+fn awk_dangerous(cmd: &str) -> bool {
+    if cmd.contains("system(")
+        || cmd.contains("getline")
+        || cmd.contains(">>")
+        || cmd.contains('|')
+        || cmd.contains('`')
+        || cmd.contains("$(")
+    {
+        return true;
+    }
+    // `print … > file` style redirections (a bare `>` comparison like
+    // `NR>2` only matters when it follows print/printf — err on the safe
+    // side: any print-then-> sequence disqualifies the GREEN path).
+    static PRINT_GT: OnceLock<Regex> = OnceLock::new();
+    let re = PRINT_GT
+        .get_or_init(|| Regex::new(r"(print|printf)[^;}]*>").expect("valid print-redirect regex"));
+    re.is_match(cmd)
 }
 
 /// User whitelist: EXACT string match only. Never overrides the blacklist
@@ -319,6 +378,13 @@ impl RiskEngine {
         // read whitelist so `cat x > /tmp/y` cannot green-light a redirect.
         for r in write_rules() {
             if r.re.is_match(cmd) {
+                // Discarding output is NOT a file write: `cmd 2>/dev/null`,
+                // `>/dev/null`, `2>&1` etc. leave no side effect. Only the
+                // redirect-write rule gets this exemption — every other
+                // write pattern (cp/rm/chmod/…) is unaffected.
+                if r.name == "redirect-write" && redirect_only_sinks(cmd) {
+                    continue;
+                }
                 return RiskAssessment {
                     level: RiskLevel::Yellow,
                     rule: r.name.to_string(),
@@ -328,10 +394,12 @@ impl RiskEngine {
         }
 
         // Layer 3: read-only whitelist (GREEN). find(1) is only read-only
-        // WITHOUT -delete / -exec; guard it.
+        // WITHOUT -delete / -exec; guard it. awk can run arbitrary commands
+        // (system()/getline/redirects/pipes) — guard it the same way.
         let find_guarded =
             cmd.starts_with("find ") && (cmd.contains("-delete") || cmd.contains("-exec"));
-        if !find_guarded {
+        let awk_guarded = cmd.starts_with("awk") && awk_dangerous(cmd);
+        if !find_guarded && !awk_guarded {
             for r in read_rules() {
                 if r.re.is_match(cmd) {
                     return RiskAssessment {
@@ -577,5 +645,107 @@ mod tests {
         // The semicolon lives inside quotes: single ls command stays GREEN.
         let a = grade("ls 'a;b.txt'", "");
         assert_eq!(a.level, RiskLevel::Green);
+    }
+
+    // ---- built-in probe regressions (dashboard / file browser) ----
+    // These are the exact command shapes shipped in src/store.ts. The
+    // execution gate re-grades them on every call, so a rule change that
+    // turns them YELLOW silently breaks the server dashboard and file list.
+
+    #[test]
+    fn devnull_redirect_is_not_a_write() {
+        for cmd in [
+            "ls -la /tmp 2>/dev/null",
+            "cat /etc/hosts > /dev/null",
+            "nproc 2>/dev/null || echo 1",
+            "uptime -p 2>/dev/null",
+        ] {
+            let a = grade(cmd, "");
+            assert_eq!(a.level, RiskLevel::Green, "expected GREEN for: {cmd}");
+        }
+        // Real file targets keep the YELLOW write classification.
+        for cmd in [
+            "echo hello > /tmp/x",
+            "cat /etc/hosts >> /var/log/h.log",
+            "ls > /etc/cron.d/evil",
+            "ls >2", // a file literally named "2" is still a write
+        ] {
+            let a = grade(cmd, "");
+            assert_eq!(a.level, RiskLevel::Yellow, "expected YELLOW for: {cmd}");
+        }
+    }
+
+    #[test]
+    fn builtin_nav_and_tools_whitelisted() {
+        for cmd in [
+            "pwd",
+            "cd /var/log",
+            "nproc",
+            "cut -d' ' -f1-3 /proc/loadavg",
+            "exit 0",
+            "[ -f /etc/hosts ]",
+            "test -d /usr",
+        ] {
+            let a = grade(cmd, "");
+            assert_eq!(a.level, RiskLevel::Green, "expected GREEN for: {cmd}");
+        }
+    }
+
+    #[test]
+    fn awk_guarded_by_danger_features() {
+        // Pure text processing is read-only.
+        let ok = grade("awk 'NR==2{print $2\" \"$3}' /proc/meminfo", "");
+        assert_eq!(ok.level, RiskLevel::Green);
+        // Command execution / pipes / redirects disqualify GREEN.
+        for cmd in [
+            "awk 'BEGIN{system(\"id\")}'",
+            "awk '{print | \"sh\"}' x",
+            "awk '{print $1 > \"/tmp/f\"}' x",
+            "awk 'NR{cmd=\"rm -rf /\"}' x",
+        ] {
+            let a = grade(cmd, "");
+            assert_eq!(a.level, RiskLevel::Yellow, "expected YELLOW for: {cmd}");
+        }
+    }
+
+    #[test]
+    fn dashboard_probe_is_green() {
+        // src/store.ts `loadServerInfo` probe, rewritten without `$()`.
+        let probe = "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3\" \"$7}'; \
+             echo @SWAP; free -b | awk 'NR==3{print $2\" \"$3}'; \
+             echo @DISK; df -B1 / | awk 'NR==2{print $2\" \"$3}'; \
+             echo @NET; awk 'NR<3{next} $1!=\"lo:\" {rx+=$2; tx+=$10} END{print rx+0\" \"tx+0}' /proc/net/dev; \
+             echo @DISKIO; awk 'FNR==NR{ if ($2==\"/\") { d=$1; sub(/.*\\//,\"\",d) } next } \
+             { b=d; sub(/[0-9]+$/,\"\",b); if ($3==d && !e) { e=$6\" \"$10 } \
+             else if ($3==b && !p) { p=$6\" \"$10 } } \
+             END{ if (e) print e; else if (p) print p; else print \"\" }' /proc/mounts /proc/diskstats; \
+             echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; \
+             echo @CORES; nproc 2>/dev/null || echo 1; \
+             echo @UPTIME; uptime -p | cut -c4-";
+        let a = grade(probe, "");
+        assert_eq!(
+            a.level,
+            RiskLevel::Green,
+            "dashboard probe must stay GREEN (rule={}, reason={})",
+            a.rule,
+            a.reason
+        );
+    }
+
+    #[test]
+    fn listdir_probe_is_green() {
+        // src/store.ts `listDir` probe: `$(pwd)` replaced by a plain `pwd`
+        // segment; the `{ echo @ERR; exit 0; }` fallback splits into groups.
+        let probe = "cd -- '/var/log' 2>/dev/null || { echo @ERR; exit 0; }; \
+             echo @CWD; pwd; echo @LS; \
+             ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'";
+        let a = grade(probe, "");
+        assert_eq!(
+            a.level,
+            RiskLevel::Green,
+            "listDir probe must stay GREEN (rule={}, reason={})",
+            a.rule,
+            a.reason
+        );
     }
 }
