@@ -1080,6 +1080,12 @@ pub async fn exec_oneshot(
         ch
     };
 
+    // Close our side of stdin immediately: this path never writes stdin
+    // data, so interactive prompts ([Y/n], password, "press enter") must
+    // receive EOF and fail fast instead of hanging until the wall-clock
+    // timeout.
+    let _ = ch.eof().await;
+
     // Wall-clock timeout (a streaming `tail -f` must NOT reset the timer on
     // every frame) and a hard output cap (unbounded growth protection).
     const MAX_OUT: usize = 512 * 1024;
