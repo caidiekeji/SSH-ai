@@ -6,6 +6,7 @@
 //! - HC-04: LLM traffic goes directly to the user's base_url.
 //! - HC-05: raw PTY bytes are normalized before any LLM sees them.
 
+mod agent_shell;
 mod ai;
 mod commands;
 mod keyring_store;
@@ -131,6 +132,10 @@ pub fn run() {
             commands::parse_preview,
             // Server dashboard (user-initiated exec, never AI-driven)
             commands::exec_oneshot,
+            // Agent execution: persistent shell (state survives across steps)
+            // + local screen observation for PTY takeover steps.
+            commands::agent_exec,
+            commands::read_screen_tail,
             // SFTP (user-initiated file transfer)
             commands::sftp_download,
             commands::sftp_upload_data,
