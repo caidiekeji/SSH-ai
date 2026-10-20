@@ -305,7 +305,7 @@ pub async fn run_chat(
         role: "user".into(),
         content: question.into(),
     });
-    let (text, complete) = provider
+    let (text, _complete) = provider
         .chat_stream(messages, ChatOptions::default(), on_chunk)
         .await?;
     Ok(text)
@@ -458,7 +458,7 @@ pub async fn run_agent_step(
             content: user,
         },
     ];
-    let (text, complete) = provider
+    let (text, _complete) = provider
         .chat_stream(messages, ChatOptions::default(), &mut |_| {})
         .await?;
     parse_agent_response_obj(&text).map_err(crate::provider::error::ProviderError::Config)

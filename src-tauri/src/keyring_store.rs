@@ -54,7 +54,7 @@ pub fn sanitize_log(input: &str) -> String {
         Regex::new("(?i)authorization[\"']?\\s*[:=]\\s*[\"']?[^\"',\r\n]+").expect("valid regex")
     });
     let pem = PEM.get_or_init(|| {
-        Regex::new("-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")
+        Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")
             .expect("valid regex")
     });
     let s = pem.replace_all(input, "[REDACTED-PRIVATE-KEY]");

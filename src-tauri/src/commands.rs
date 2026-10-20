@@ -707,7 +707,7 @@ pub(crate) async fn open_sftp(state: &State<'_, AppState>, session_id: u64) -> R
     let ch = {
         let mut guard = handle_cell.lock().await;
         let handle = guard.as_mut().ok_or("会话已断开")?;
-        let mut ch = handle
+        let ch = handle
             .channel_open_session()
             .await
             .map_err(|e| format!("打开通道失败: {e}"))?;
@@ -1070,7 +1070,7 @@ pub async fn exec_oneshot(
     let mut ch = {
         let mut guard = handle_cell.lock().await;
         let handle = guard.as_mut().ok_or("会话已断开")?;
-        let mut ch = handle
+        let ch = handle
             .channel_open_session()
             .await
             .map_err(|e| format!("打开执行通道失败: {e}"))?;

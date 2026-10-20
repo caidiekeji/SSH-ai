@@ -354,7 +354,6 @@ async fn run_tool(app: &tauri::AppHandle, name: &str, args: &Value) -> Result<St
             Ok("已断开".to_string())
         }
         "upload_file" => {
-            use base64::Engine;
             let session_id = args.get("session_id").and_then(|v| v.as_u64()).ok_or("缺少 session_id")?;
             let remote_path = args.get("remote_path").and_then(|v| v.as_str()).ok_or("缺少 remote_path")?.to_string();
             let data_b64 = args.get("data_base64").and_then(|v| v.as_str()).ok_or("缺少 data_base64")?.to_string();
