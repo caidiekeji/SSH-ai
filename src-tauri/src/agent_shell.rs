@@ -75,7 +75,9 @@ fn find_sentinel(buf: &[u8]) -> Option<(i32, usize)> {
 /// names client/server handle types.
 pub fn spawn_shell<S>(ch: russh::Channel<S>) -> mpsc::Sender<ShellReq>
 where
-    S: Send + 'static,
+    // `Channel` requires From<(ChannelId, ChannelMsg)>; `data`/`wait` also
+    // require Sync (bounds demanded by russh 0.45's impl blocks).
+    S: Send + Sync + 'static + From<(russh::ChannelId, russh::ChannelMsg)>,
 {
     let (tx, mut rx) = mpsc::channel::<ShellReq>(4);
     tokio::spawn(async move {
@@ -164,7 +166,10 @@ where
 /// interactive package prompts, then source the login profiles (guarded by
 /// stdin EOF + `|| true` so a noisy profile cannot hang the handshake).
 /// Consumed silently — the first agent command never sees this noise.
-async fn run_init<S: Send + 'static>(c: &mut russh::Channel<S>) {
+async fn run_init<S>(c: &mut russh::Channel<S>)
+where
+    S: Sync + From<(russh::ChannelId, russh::ChannelMsg)>,
+{
     const INIT: &str = "export PAGER=cat GIT_PAGER=cat AWS_PAGER='' TF_INPUT=0 DEBIAN_FRONTEND=noninteractive NO_COLOR=1; { . \"$HOME/.profile\"; . \"$HOME/.bashrc\"; } < /dev/null 2>/dev/null || true; set +e; printf '\\n\\001AISA_READY\\002\\n'";
     if c.data(INIT.into()).await.is_err() {
         return;
