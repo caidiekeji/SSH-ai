@@ -787,19 +787,23 @@ export const useStore = create<Store>((set, get) => ({
     const { sessionId } = get();
     if (!sessionId) return;
     // Single POSIX probe: memory / swap / disk / load / cores / uptime /
-    // network bytes (all non-lo IFs) / root-disk sectors read+written.
+    // network bytes (all non-LO IFs) / root-disk sectors read+written.
+    // NOTE: must stay GREEN under the Rust execution gate (read-only
+    // segments + no `$(...)` substitution). DISKIO reads /proc/mounts +
+    // /proc/diskstats in ONE awk instead of `d=$(df …)` — command
+    // substitution would force YELLOW and the gate would refuse it.
     const probe =
       "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3\" \"$7}'; " +
       "echo @SWAP; free -b | awk 'NR==3{print $2\" \"$3}'; " +
       "echo @DISK; df -B1 / | awk 'NR==2{print $2\" \"$3}'; " +
-      "echo @NET; awk 'NR>2 && $1!=\"lo:\" {rx+=$2; tx+=$10} END{print rx+0\" \"tx+0}' /proc/net/dev; " +
-      "echo @DISKIO; d=$(df / | tail -1 | awk '{print $1}' | sed 's|.*/||'); " +
-      "line=$(awk -v d=\"$d\" '$3==d{print $6\" \"$10; exit}' /proc/diskstats); " +
-      "[ -z \"$line\" ] && line=$(awk -v d=\"${d%%[0-9]*}\" '$3==d{print $6\" \"$10; exit}' /proc/diskstats); " +
-      "echo \"$line\"; " +
+      "echo @NET; awk 'NR<3{next} $1!=\"lo:\" {rx+=$2; tx+=$10} END{print rx+0\" \"tx+0}' /proc/net/dev; " +
+      "echo @DISKIO; awk 'FNR==NR{ if ($2==\"/\") { d=$1; sub(/.*\\//,\"\",d) } next } " +
+      "{ b=d; sub(/[0-9]+$/,\"\",b); if ($3==d && !e) { e=$6\" \"$10 } " +
+      "else if ($3==b && !p) { p=$6\" \"$10 } } " +
+      "END{ if (e) print e; else if (p) print p; else print \"\" }' /proc/mounts /proc/diskstats; " +
       "echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; " +
       "echo @CORES; nproc 2>/dev/null || echo 1; " +
-      "echo @UPTIME; uptime -p 2>/dev/null | sed 's/^up //'";
+      "echo @UPTIME; uptime -p 2>/dev/null | cut -c4-";
     try {
       const out = await ipc.execOneshot(sessionId, probe);
       const sec = (tag: string) => {
@@ -857,9 +861,11 @@ export const useStore = create<Store>((set, get) => ({
     const qdir =
       path === "~" ? '"$HOME"' : path.startsWith("~/") ? '"$HOME' + rest + '"' : "'" + path.replace(/'/g, "'\\''") + "'";
     // -A all-but-dotfiles, -p dir suffix, long-iso time, size + name only.
+    // Must stay GREEN under the execution gate: no `$(pwd)` substitution
+    // (a separate `pwd` segment instead) and only whitelisted segments.
     const probe =
-      `cd -- ${qdir} 2>/dev/null || { echo @ERR; exit 0; }; echo "@CWD\n$(pwd)"; ` +
-      `echo "@LS"; ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'`;
+      `cd -- ${qdir} 2>/dev/null || { echo @ERR; exit 0; }; echo @CWD; pwd; ` +
+      `echo @LS; ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'`;
     try {
       const out = await ipc.execOneshot(sessionId, probe);
       if (out.startsWith("@ERR")) {
