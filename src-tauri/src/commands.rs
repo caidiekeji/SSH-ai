@@ -1019,6 +1019,27 @@ pub fn save_uploaded_key(
 /// Run a one-shot command on a fresh exec channel (NOT the PTY). Powers the
 /// server dashboard probe and explicit user-initiated file operations.
 /// This path is USER-triggered only — AI output never reaches it (HC-03).
+/// Execution-layer gate: the SINGLE choke point for every non-PTY exec
+/// (dashboard probes, file ops, agent steps, MCP exec_command). Every
+/// command is re-graded HERE regardless of what the caller checked.
+/// RED is always refused; YELLOW requires `ack == "yellow"` (user approval
+/// forwarded by the caller); GREEN runs with any ack.
+pub fn execution_gate(state: &AppState, command: &str, ack: &str) -> Result<(), String> {
+    use crate::safety::risk::RiskLevel;
+    let assessment = state.risk.assess(command, "");
+    match assessment.level {
+        RiskLevel::Red => Err(format!(
+            "已拒绝执行：命中黑名单规则「{}」——{}。该命令风险过高，如确需执行请在终端中手动输入。",
+            assessment.rule, assessment.reason
+        )),
+        RiskLevel::Yellow if ack != "yellow" => Err(format!(
+            "已拒绝执行：该命令为写操作（{}）。请通过 Agent 确认流程执行，或检查命令是否应包含写操作。",
+            assessment.reason
+        )),
+        _ => Ok(()),
+    }
+}
+
 #[tauri::command]
 pub async fn exec_oneshot(
     state: State<'_, AppState>,
@@ -1031,29 +1052,10 @@ pub async fn exec_oneshot(
     // caller has user authorization for a YELLOW (write) command.
     user_ack: Option<String>,
 ) -> Result<String, String> {
-    use crate::safety::risk::RiskLevel;
     use russh::ChannelMsg;
 
-    // ---- execution-layer gate: the SINGLE choke point for every non-PTY
-    // exec (dashboard probes, file ops, agent steps, MCP exec_command).
-    // Every command is re-graded HERE regardless of what the caller checked.
     let ack = user_ack.as_deref().unwrap_or("none");
-    let assessment = state.risk.assess(&command, "");
-    match assessment.level {
-        RiskLevel::Red => {
-            return Err(format!(
-                "已拒绝执行：命中黑名单规则「{}」——{}。该命令风险过高，如确需执行请在终端中手动输入。",
-                assessment.rule, assessment.reason
-            ))
-        }
-        RiskLevel::Yellow if ack != "yellow" => {
-            return Err(format!(
-                "已拒绝执行：该命令为写操作（{}）。请通过 Agent 确认流程执行，或检查命令是否应包含写操作。",
-                assessment.reason
-            ))
-        }
-        _ => {}
-    }
+    execution_gate(&state, &command, ack)?;
 
     let timeout = timeout_secs.unwrap_or(15).clamp(5, 300);
     // Clone the Arc'd cell out of the map, then drop the std guard BEFORE
@@ -1126,4 +1128,111 @@ pub async fn exec_oneshot(
         text.push_str("\n…（输出已截断：超过 512KB 或超时）");
     }
     Ok(text)
+}
+
+/// Agent execution on the PERSISTENT shell channel: one remote shell reused
+/// across agent steps so `cd` / `export` survive between commands. Goes
+/// through the same execution-layer gate as `exec_oneshot`.
+#[tauri::command]
+pub async fn agent_exec(
+    state: State<'_, AppState>,
+    session_id: u64,
+    command: String,
+    // Agent loop passes the configured exec timeout; default 60 s.
+    timeout_secs: Option<u64>,
+    // "yellow" = user approved this write command in the agent dialog.
+    user_ack: Option<String>,
+) -> Result<crate::agent_shell::ShellResp, String> {
+    let ack = user_ack.as_deref().unwrap_or("none");
+    execution_gate(&state, &command, ack)?;
+    let timeout = timeout_secs.unwrap_or(60).clamp(5, 300);
+
+    // Clone the Arc'd cells out of the map, then drop the std guard BEFORE
+    // any await so the future stays Send.
+    let (handle_cell, shell_slot) = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let s = sessions.get(&session_id).ok_or("会话不存在")?;
+        (s.handle.clone(), s.agent_shell.clone())
+    };
+
+    // Dead shell gets exactly ONE reopen + retry before giving up.
+    let mut final_resp: Option<crate::agent_shell::ShellResp> = None;
+    for attempt in 0..2u8 {
+        // Fetch (or lazily create) the persistent shell driver.
+        let tx = {
+            let mut slot = shell_slot.lock().await;
+            if slot.is_none() {
+                let mut guard = handle_cell.lock().await;
+                let handle = guard.as_mut().ok_or("会话已断开")?;
+                let ch = handle
+                    .channel_open_session()
+                    .await
+                    .map_err(|e| format!("打开 Agent 执行通道失败: {e}"))?;
+                ch.request_shell()
+                    .await
+                    .map_err(|e| format!("请求 Agent shell 失败: {e}"))?;
+                *slot = Some(crate::agent_shell::spawn_shell(ch));
+            }
+            slot.as_ref()
+                .cloned()
+                .ok_or_else(|| "Agent 执行通道不可用".to_string())?
+        };
+
+        let (rtx, rrx) = tokio::sync::oneshot::channel();
+        if tx
+            .send(crate::agent_shell::ShellReq::Exec {
+                command: command.clone(),
+                timeout_secs: timeout,
+                resp: rtx,
+            })
+            .await
+            .is_err()
+        {
+            *shell_slot.lock().await = None;
+            continue;
+        }
+        match rrx.await {
+            Ok(resp) if resp.shell_gone && attempt == 0 => {
+                // Shell exited (e.g. the command ran `exit`): reopen once.
+                *shell_slot.lock().await = None;
+                continue;
+            }
+            Ok(resp) => {
+                final_resp = Some(resp);
+                break;
+            }
+            Err(_) => {
+                *shell_slot.lock().await = None;
+            }
+        }
+    }
+    final_resp.ok_or_else(|| "Agent 执行通道已失效，请重试".to_string())
+}
+
+/// Read the terminal's latest visible lines (local screen model — NO remote
+/// execution). Used by the agent to observe the PTY the user is watching.
+#[tauri::command]
+pub async fn read_screen_tail(
+    state: State<'_, AppState>,
+    session_id: u64,
+    lines: Option<usize>,
+) -> Result<String, String> {
+    let pipeline_arc = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .map(|s| s.pipeline.clone())
+            .ok_or("会话不存在")?
+    };
+    let p = pipeline_arc.lock().await;
+    let total = p.screen.lines.len();
+    let n = lines.unwrap_or(30).clamp(1, 200).min(total);
+    Ok(p
+        .screen
+        .lines
+        .iter()
+        .skip(total - n)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
