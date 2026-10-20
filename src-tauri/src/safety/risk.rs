@@ -226,21 +226,10 @@ impl RiskEngine {
         let cmd = command.trim();
         let _ = ai_risk_hint; // explicitly unused for the decision
 
-        // Layer 5 (inverted priority): user whitelist — exact FULL-command
-        // match only, still subject to the blacklist below.
-        {
-            let wl = self.whitelist.lock().unwrap_or_else(|e| e.into_inner());
-            if wl.iter().any(|w| w == cmd) {
-                return RiskAssessment {
-                    level: RiskLevel::Green,
-                    rule: "user-whitelist".into(),
-                    reason: "用户白名单（精确匹配）".into(),
-                };
-            }
-        }
-
         // Layer 1 applies to the WHOLE command (blacklist regexes match
         // substrings, so chained payload after a benign prefix is still RED).
+        // The blacklist ALWAYS wins — checked before the user whitelist so
+        // whitelisting a blacklisted pattern cannot downgrade RED (PRD §5.5).
         for r in blacklist() {
             if r.re.is_match(cmd) {
                 return RiskAssessment {
@@ -282,6 +271,19 @@ impl RiskEngine {
             worst = RiskLevel::Yellow;
             worst_rule = "command-substitution".into();
             worst_reason = "包含命令替换 $() 或反引号，按中风险处理".into();
+        }
+        // Layer 5: user whitelist — exact FULL-command match only. It SKIPS
+        // the confirmation (worst < RED) but never overrides a blacklist hit:
+        // blacklisted patterns stay RED even if explicitly whitelisted.
+        if worst < RiskLevel::Red {
+            let wl = self.whitelist.lock().unwrap_or_else(|e| e.into_inner());
+            if wl.iter().any(|w| w == cmd) {
+                return RiskAssessment {
+                    level: RiskLevel::Green,
+                    rule: "user-whitelist".into(),
+                    reason: "用户白名单（精确匹配）".into(),
+                };
+            }
         }
         RiskAssessment {
             level: worst,
@@ -560,8 +562,14 @@ mod tests {
 
     #[test]
     fn unbalanced_quotes_conservative() {
-        let a = grade("echo 'unclosed; rm -rf /", "read");
+        // Unparseable structure without blacklist content → conservative
+        // YELLOW (the unparseable path runs after the whole-string blacklist
+        // pass, so blacklist content can never be downgraded this way).
+        let a = grade("echo 'unclosed; ls -la", "read");
         assert_eq!(a.level, RiskLevel::Yellow);
+        // Hiding a blacklisted pattern behind an unclosed quote stays RED.
+        let b = grade("echo 'unclosed; rm -rf /", "read");
+        assert_eq!(b.level, RiskLevel::Red);
     }
 
     #[test]
