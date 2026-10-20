@@ -472,7 +472,7 @@ function AgentCard() {
           {steps.map((s) => (
             <div key={s.no} className="agent-step">
               <div className="agent-step-top">
-                <span className={`risk-dot risk-${s.risk === "destructive" ? "red" : s.risk === "write" ? "yellow" : "green"}`} />
+                <span className={`risk-dot risk-${s.risk === "red" || s.risk === "destructive" ? "red" : s.risk === "yellow" || s.risk === "write" ? "yellow" : "green"}`} />
                 <span className="agent-step-no">{s.no}.</span>
                 <code className="agent-step-cmd">{s.command}</code>
                 {s.kind === "verify" && <span className="verify-badge">验证</span>}
