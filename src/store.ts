@@ -109,7 +109,7 @@ interface Store {
   // ---- agent mode (automated ops loop) ----
   agentStatus: "idle" | "running" | "waiting" | "done" | "failed" | "stopped";
   agentGoal: string;
-  agentSteps: { no: number; command: string; description: string; output: string; risk: string; kind: "exec" | "verify" }[];
+  agentSteps: { no: number; command: string; description: string; output: string; risk: string; kind: "exec" | "verify" | "pty" }[];
   agentApproval: { command: string; description: string; level: string } | null;
   agentError: string;
   _agentResolve: ((ok: boolean) => void) | null;
@@ -145,6 +145,31 @@ let diagRunning = false;
 // longer matches the current one exits instead of resurrecting (stop -> start
 // race previously let the OLD and NEW loops run in parallel).
 let agentRunSeq = 0;
+
+/**
+ * Trim command output for the model: keep head + tail + error-ish lines in
+ * the middle, with an EXPLICIT omission marker (OpenHands-style). Long
+ * outputs otherwise either get silently cut at the tail (losing the error at
+ * the top) or blow the context window.
+ */
+const trimForAi = (raw: string): string => {
+  const MAX_CHARS = 6000;
+  if (raw.length <= MAX_CHARS && raw.split("\n").length <= 60) return raw;
+  const lines = raw.split("\n");
+  const head = lines.slice(0, 12);
+  const tail = lines.slice(-30);
+  const errRe =
+    /(error|fail|fatal|traceback|exception|denied|refused|not found|no such|timeout|panic|错误|失败|拒绝|超时|不存在)/i;
+  const mid = lines.slice(12, -30).filter((l) => errRe.test(l)).slice(0, 15);
+  const omitted = Math.max(0, lines.length - head.length - tail.length - mid.length);
+  const out = [
+    ...head,
+    `…（已省略中间 ${omitted} 行，保留错误相关行与结尾）…`,
+    ...mid,
+    ...tail,
+  ].join("\n");
+  return out.length > MAX_CHARS + 500 ? out.slice(-(MAX_CHARS + 500)) : out;
+};
 
 // Previous raw byte/sector counters (for computing per-second rates).
 let lastIoRaw: { sessionId: number; rx: number; tx: number; dr: number; dw: number; t: number } | null = null;
@@ -526,7 +551,7 @@ export const useStore = create<Store>((set, get) => ({
     void get().agentLoop(runId);
   },
   agentLoop: async (runId: number) => {
-    const MAX_STEPS = 12;
+    const MAX_STEPS = 16;
     let verifyAsked = false; // 是否已要求 AI 补验证（防无限验证循环）
     // A loop whose run token was superseded (stop -> new start) must exit,
     // not resume and double-execute steps alongside the new loop.
@@ -541,6 +566,9 @@ export const useStore = create<Store>((set, get) => ({
       const st = get();
       void ipc.saveAgentLog(st.agentGoal, s, st.agentSteps);
     };
+    // Consecutive execution failures (gate refusals / channel errors) that
+    // the model failed to correct — 3 in a row ends the run.
+    let failStreak = 0;
     for (let i = 1; i <= MAX_STEPS; i++) {
       const st = get();
       if (st.agentStatus !== "running" || !st.sessionId) return;
@@ -589,6 +617,58 @@ export const useStore = create<Store>((set, get) => ({
         audit("failed");
         return;
       }
+
+      // pty action: write keystrokes into the terminal the USER is watching
+      // (always requires explicit approval — this is a takeover), then read
+      // the visible screen back as the step's observation.
+      if (step.action === "pty") {
+        const keys = step.keys || "";
+        if (!keys) {
+          set({ agentStatus: "failed", agentError: "Agent 返回了空的终端按键", });
+          audit("failed");
+          return;
+        }
+        set({
+          agentStatus: "waiting",
+          agentApproval: {
+            command: `【接管终端】${keys.slice(0, 300)}`,
+            description: step.description || "向你正在观看的终端发送按键",
+            level: "yellow",
+          },
+        });
+        const okPty = await new Promise<boolean>((resolve) => set({ _agentResolve: resolve } as Partial<Store>));
+        if (get().agentStatus === "stopped") return;
+        set({ agentApproval: null, agentStatus: "running" });
+        if (!okPty) {
+          set({ agentStatus: "stopped", agentError: "你拒绝了终端接管，任务已停止" });
+          audit("stopped");
+          return;
+        }
+        let screen = "";
+        try {
+          await ipc.terminalWrite(st.sessionId, new TextEncoder().encode(keys));
+          await new Promise((r) => setTimeout(r, 1500));
+          screen = await ipc.readScreenTail(st.sessionId, 40);
+        } catch (e) {
+          screen = `【终端写入失败】${String(e)}`;
+        }
+        if (get().agentStatus !== "running") return;
+        set((s) => ({
+          agentSteps: [
+            ...s.agentSteps,
+            {
+              no: i,
+              command: `[终端] ${keys.replace(/\n/g, "⏎").slice(0, 120)}`,
+              description: step.description || "终端交互",
+              output: trimForAi(screen || "（终端画面为空）"),
+              risk: "yellow",
+              kind: "pty",
+            },
+          ],
+        }));
+        continue;
+      }
+
       const command = step.command || "";
       if (!command) {
         set({ agentStatus: "failed", agentError: "Agent 返回了空命令" });
@@ -623,27 +703,49 @@ export const useStore = create<Store>((set, get) => ({
         }
       }
 
-      // 4. Execute on the separate oneshot channel (timeout from settings).
+      // 4. Execute on the PERSISTENT shell (state survives across steps).
       // YELLOW only reaches here after the user clicked approve in step 3 —
       // pass that authorization through, otherwise the Rust execution gate
       // (ack=none → green-only) rejects every approved write command.
       let output = "";
       try {
-        output = await ipc.execOneshot(
+        const resp = await ipc.agentExec(
           st.sessionId,
           command,
           execTimeout,
           assessment.level === "yellow" ? "yellow" : undefined,
         );
+        output = resp.output;
+        if (resp.exitCode !== null && resp.exitCode !== 0) {
+          output += `\n（退出码 ${resp.exitCode}：命令未成功，请分析报错后再决定下一步）`;
+        }
+        if (resp.timedOut) {
+          output += "\n（命令超时：执行通道已重置，cd/export 等状态可能已丢失）";
+        } else if (resp.shellGone) {
+          output += "\n（shell 已退出：执行通道已重置，cd/export 等状态可能已丢失）";
+        }
+        if (!output.trim()) output = "（命令执行完成，无输出）";
       } catch (e) {
+        // Gate refusal or channel error: feed it back as a step so the model
+        // can self-correct instead of killing the whole run. Three
+        // consecutive uncorrected failures end the task.
+        failStreak += 1;
+        const msg = `【执行被拒/失败】${String(e)}`;
         set((s) => ({
-          agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: String(e), risk: assessment.level, kind }],
-          agentStatus: "failed",
-          agentError: `第 ${i} 步执行失败: ${String(e)}`,
+          agentSteps: [
+            ...s.agentSteps,
+            { no: i, command, description: step.description || "", output: msg, risk: assessment.level, kind },
+          ],
         }));
-        audit("failed");
-        return;
+        if (failStreak >= 3) {
+          set({ agentStatus: "failed", agentError: `连续 ${failStreak} 次执行失败，任务中止：${String(e)}` });
+          audit("failed");
+          return;
+        }
+        if (get().agentStatus !== "running") return;
+        continue;
       }
+      failStreak = 0;
       if (get().agentStatus !== "running") return;
       set((s) => ({
         agentSteps: [
@@ -652,7 +754,7 @@ export const useStore = create<Store>((set, get) => ({
             no: i,
             command,
             description: step.action === "verify" ? `${step.description || "验证"}${step.expect ? `（预期: ${step.expect}）` : ""}` : step.description || "",
-            output: output.slice(-1600),
+            output: trimForAi(output),
             risk: assessment.level,
             kind,
           },
