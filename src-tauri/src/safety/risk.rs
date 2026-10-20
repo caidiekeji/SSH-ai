@@ -701,11 +701,15 @@ mod tests {
             "awk 'BEGIN{system(\"id\")}'",
             "awk '{print | \"sh\"}' x",
             "awk '{print $1 > \"/tmp/f\"}' x",
-            "awk 'NR{cmd=\"rm -rf /\"}' x",
         ] {
             let a = grade(cmd, "");
             assert_eq!(a.level, RiskLevel::Yellow, "expected YELLOW for: {cmd}");
         }
+        // Blacklist patterns inside an awk string are caught by the
+        // whole-string blacklist pass BEFORE the awk guard ever runs —
+        // that is strictly stronger than YELLOW.
+        let r = grade("awk 'NR{cmd=\"rm -rf /\"}' x", "");
+        assert_eq!(r.level, RiskLevel::Red);
     }
 
     #[test]
