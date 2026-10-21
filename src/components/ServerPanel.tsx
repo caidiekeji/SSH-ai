@@ -7,6 +7,7 @@ import { useStore } from "../store";
 import { ipc } from "../ipc";
 import type { ConnectionConfig, FileEntry } from "../types";
 import { Icon } from "./Icon";
+import { HostFormFields, connFromForm, emptyHostForm, useKeyUpload, type HostFormValues } from "./HostForm";
 
 const fmtSize = (n: number) => {
   if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
@@ -18,6 +19,7 @@ const fmtSize = (n: number) => {
 export function ServerPanel() {
   const connections = useStore((s) => s.connections);
   const connStatus = useStore((s) => s.connStatus);
+  const connError = useStore((s) => s.connError);
   const sessionId = useStore((s) => s.sessionId);
   const activeHost = useStore((s) => s.activeHost);
   const serverInfo = useStore((s) => s.serverInfo);
@@ -30,20 +32,22 @@ export function ServerPanel() {
   const runOp = useStore((s) => s.runOp);
 
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({
-    name: "",
-    host: "",
-    port: 22,
-    username: "root",
-    authMethod: "password" as "password" | "publickey",
-    password: "",
-    keyPath: "",
-  });
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [editFile, setEditFile] = useState<{ path: string; name: string } | null>(null);
+  const [editText, setEditText] = useState("");
+  const [editBusy, setEditBusy] = useState(false);
+  const [editErr, setEditErr] = useState("");
+  const [fmMsg, setFmMsg] = useState("");
+  const [form, setForm] = useState<HostFormValues>(emptyHostForm);
   const [err, setErr] = useState("");
+  const { keyBusy, onKeyFile } = useKeyUpload(setForm, setErr);
   const [pathInput, setPathInput] = useState("~");
   const [op, setOp] = useState<{ title: string; danger: boolean; detail: string; run: () => Promise<void> } | null>(null);
   const [preview, setPreview] = useState<{ name: string; text: string } | null>(null);
   const [opBusy, setOpBusy] = useState(false);
+  // Text-input dialog state (WebView2 does NOT support window.prompt —
+  // a custom modal is required for mkdir / rename name entry).
+  const [ask, setAsk] = useState<{ title: string; label: string; value: string; onOk: (v: string) => void } | null>(null);
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -82,7 +86,24 @@ export function ServerPanel() {
         use_saved_password: has,
         connection_id: conn.id,
       });
-      st.setConn({ sessionId: res.sessionId, connStatus: "connected" });
+      st.openTab(
+        res.sessionId,
+        conn.name,
+        `${conn.host}:${conn.port}`,
+        has
+          ? {
+              host: conn.host,
+              port: conn.port,
+              username: conn.username,
+              auth:
+                conn.auth_method === "password"
+                  ? { kind: "password", password: "" }
+                  : { kind: "publickey", key_path: conn.key_path || "", passphrase: null },
+              use_saved_password: true,
+              connection_id: conn.id,
+            }
+          : undefined,
+      );
     } catch (e) {
       st.setConn({ connStatus: "error", connError: String(e) });
     }
@@ -99,20 +120,13 @@ export function ServerPanel() {
         auth:
           form.authMethod === "password"
             ? { kind: "password", password: form.password }
-            : { kind: "publickey", key_path: form.keyPath, passphrase: null },
+            : { kind: "publickey", key_path: form.keyPath, passphrase: form.password || null },
       });
-      const conn: ConnectionConfig = {
-        id: `conn-${Date.now()}`,
-        name: form.name || form.host,
-        host: form.host,
-        port: Number(form.port),
-        username: form.username,
-        auth_method: form.authMethod,
-        key_path: form.authMethod === "publickey" ? form.keyPath : null,
-      };
-      await ipc.saveConnection(conn, form.authMethod === "password" ? form.password : null);
+      // password = SSH password for password auth, key passphrase for pubkey.
+      const conn = connFromForm(form, `conn-${Date.now()}`);
+      await ipc.saveConnection(conn, form.password || null);
       await loadConnections();
-      st.setConn({ sessionId: res.sessionId, connStatus: "connected" });
+      st.openTab(res.sessionId, conn.name, `${form.host}:${form.port}`);
       setShowAdd(false);
       setErr("");
     } catch (e) {
@@ -123,8 +137,7 @@ export function ServerPanel() {
 
   const disconnect = async () => {
     const st = useStore.getState();
-    if (st.sessionId) await ipc.sshDisconnect(st.sessionId);
-    st.setConn({ sessionId: null, connStatus: "disconnected" });
+    if (st.activeTabId != null) await st.closeTab(st.activeTabId);
   };
 
   const connected = connStatus === "connected";
@@ -148,17 +161,21 @@ export function ServerPanel() {
   };
   const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
-  const mkdir = async () => {
-    const name = window.prompt("新文件夹名称：");
-    if (!name) return;
-    setOp({
+  const mkdir = () => {
+    setAsk({
       title: "新建文件夹",
-      danger: false,
-      detail: `mkdir -p ${q(name)} （位于 ${files.path}）`,
-      run: async () => {
-        await runOp(`cd ${q(files.path)} && mkdir -p ${q(name)}`);
-        await listDir(files.path);
-      },
+      label: "新文件夹名称（位于当前目录）",
+      value: "",
+      onOk: (name) =>
+        setOp({
+          title: "新建文件夹",
+          danger: false,
+          detail: `mkdir -p ${q(name)} （位于 ${files.path}）`,
+          run: async () => {
+            await runOp(`cd ${q(files.path)} && mkdir -p ${q(name)}`);
+            await listDir(files.path);
+          },
+        }),
     });
   };
 
@@ -174,15 +191,21 @@ export function ServerPanel() {
     });
 
   const doRename = (e: FileEntry) => {
-    const next = window.prompt("重命名为：", e.name);
-    if (!next || next === e.name) return;
-    setOp({
+    setAsk({
       title: "重命名",
-      danger: false,
-      detail: `mv -- ${q(e.name)} ${q(next)}（位于 ${files.path}）`,
-      run: async () => {
-        await runOp(`cd ${q(files.path)} && mv -- ${q(e.name)} ${q(next)}`);
-        await listDir(files.path);
+      label: `将「${e.name}」重命名为`,
+      value: e.name,
+      onOk: (next) => {
+        if (!next || next === e.name) return;
+        setOp({
+          title: "重命名",
+          danger: false,
+          detail: `mv -- ${q(e.name)} ${q(next)}（位于 ${files.path}）`,
+          run: async () => {
+            await runOp(`cd ${q(files.path)} && mv -- ${q(e.name)} ${q(next)}`);
+            await listDir(files.path);
+          },
+        });
       },
     });
   };
@@ -193,6 +216,81 @@ export function ServerPanel() {
       setPreview({ name: e.name, text: text || "（空文件或二进制内容）" });
     } catch (err) {
       setPreview({ name: e.name, text: `读取失败：${String(err)}` });
+    }
+  };
+
+  // ---- remote file edit (text files ≤ 100 KB, base64 round-trip) ----
+  const b64ToText = (b64: string) => {
+    const bin = atob(b64.replace(/\s+/g, ""));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  };
+  const textToB64 = (text: string) => {
+    const bytes = new TextEncoder().encode(text);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  };
+
+  const doEdit = async (e: FileEntry) => {
+    setEditErr("");
+    try {
+      const b64 = await runOp(`cd ${q(files.path)} && head -c 100000 -- ${q(e.name)} | base64`);
+      setEditFile({ path: `${files.path.replace(/\/+$/, "")}/${e.name}`, name: e.name });
+      setEditText(b64ToText(b64));
+    } catch (err) {
+      setEditErr(`读取失败：${String(err)}`);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!editFile) return;
+    setEditBusy(true);
+    setEditErr("");
+    try {
+      await runOp(`printf %s '${textToB64(editText)}' | base64 -d > ${q(editFile.path)}`);
+      setEditFile(null);
+      listDir(files.path);
+    } catch (err) {
+      setEditErr(`保存失败：${String(err)}`);
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  // ---- SFTP upload (webview bytes → base64 → remote write) ----
+  const uploadFiles = async (list: FileList | null) => {
+    if (!list || !sessionId) return;
+    for (const f of Array.from(list)) {
+      if (f.size > 60 * 1024 * 1024) {
+        setFmMsg(`跳过 ${f.name}：超过 60MB 上限`);
+        continue;
+      }
+      try {
+        const buf = new Uint8Array(await f.arrayBuffer());
+        let bin = "";
+        const CH = 0x8000; // avoid call-stack overflow on spread
+        for (let i = 0; i < buf.length; i += CH) {
+          bin += String.fromCharCode(...buf.subarray(i, i + CH));
+        }
+        const remote = `${files.path.replace(/\/+$/, "")}/${f.name}`;
+        setFmMsg(await ipc.sftpUploadData(sessionId, remote, btoa(bin)));
+      } catch (err) {
+        setFmMsg(`上传 ${f.name} 失败：${String(err)}`);
+      }
+    }
+    listDir(files.path);
+  };
+
+  const doDownload = async (e: FileEntry) => {
+    if (!sessionId) return;
+    try {
+      setFmMsg(
+        await ipc.sftpDownload(sessionId, `${files.path.replace(/\/+$/, "")}/${e.name}`),
+      );
+    } catch (err) {
+      setFmMsg(`下载失败：${String(err)}`);
     }
   };
 
@@ -226,15 +324,15 @@ export function ServerPanel() {
           </div>
         );
       })}
-      <button className="small host-add" onClick={() => setShowAdd(true)}>
-        <Icon name="plus" size={12} /> 添加主机
+      <button className="host-add" onClick={() => setShowAdd(true)}>
+        <Icon name="plus" size={14} /> 添加主机
       </button>
       {connected && (
         <button className="small host-add disconnect" onClick={disconnect}>
           断开当前连接
         </button>
       )}
-      {connStatus === "error" && <div className="error-text small-err">{useStore.getState().connError}</div>}
+      {connStatus === "error" && <div className="error-text small-err">{connError}</div>}
 
       {/* ---- server stats ---- */}
       {connected && (
@@ -244,8 +342,26 @@ export function ServerPanel() {
           {serverInfo && (
             <div className="stats">
               <Stat icon="activity" label="内存" pct={memPct} text={`${fmtSize(serverInfo.memUsed)} / ${fmtSize(serverInfo.memTotal)}`} />
+              {serverInfo.swapTotal > 0 && (
+                <Stat
+                  icon="hardDrive"
+                  label="交换分区"
+                  pct={serverInfo.swapTotal ? (serverInfo.swapUsed / serverInfo.swapTotal) * 100 : 0}
+                  text={`${fmtSize(serverInfo.swapUsed)} / ${fmtSize(serverInfo.swapTotal)}`}
+                />
+              )}
               <Stat icon="gauge" label="负载" pct={loadPct} text={`${serverInfo.load1.toFixed(2)} / ${serverInfo.cores} 核`} />
               <Stat icon="hardDrive" label="磁盘 /" pct={diskPct} text={`${fmtSize(serverInfo.diskUsed)} / ${fmtSize(serverInfo.diskTotal)}`} />
+              <div className="io-grid">
+                <IOMetric icon="arrowDown" iconCls="ico-down" label="下行" value={`${fmtSize(serverInfo.netRxRate)}/s`} title="所有网卡合计下载速率（不含本机回环）" />
+                <IOMetric icon="arrowUp" iconCls="ico-up" label="上行" value={`${fmtSize(serverInfo.netTxRate)}/s`} title="所有网卡合计上传速率（不含本机回环）" />
+                <IOMetric label="磁盘读" value={`${fmtSize(serverInfo.diskReadRate)}/s`} title="根分区每秒读取（/proc/diskstats）" />
+                <IOMetric label="磁盘写" value={`${fmtSize(serverInfo.diskWriteRate)}/s`} title="根分区每秒写入（/proc/diskstats）" />
+                {serverInfo.memAvailable > 0 && (
+                  <IOMetric label="可用内存" value={fmtSize(serverInfo.memAvailable)} title="当前可供新进程使用的物理内存" />
+                )}
+                <IOMetric label="5m负载" value={serverInfo.load5.toFixed(2)} title="5 分钟平均负载" />
+              </div>
               <div className="uptime">
                 <Icon name="clock" size={12} /> 已运行 {serverInfo.uptime}
               </div>
@@ -253,91 +369,189 @@ export function ServerPanel() {
           )}
           {!serverInfo && !serverError && <div className="dim-note">读取中…</div>}
 
-          {/* ---- file manager ---- */}
-          <h3>文件</h3>
-          <div className="file-path">
-            <input
-              value={pathInput}
-              onChange={(e) => setPathInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && listDir(pathInput || "~")}
-              spellCheck={false}
-            />
-            <button className="small" title="上级目录" onClick={upDir}><Icon name="chevronUp" size={12} /></button>
+          {/* ---- file manager launcher (content opens in a modal) ---- */}
+          <button
+            className="small fm-open"
+            title="浏览与管理远端文件"
+            onClick={() => {
+              setFilesOpen(true);
+              listDir(useStore.getState().files.path || "~");
+            }}
+          >
+            <Icon name="folder" size={13} /> 文件管理
+          </button>
+        </>
+      )}
+
+      {/* ---- file manager modal ---- */}
+      {filesOpen && (
+        <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && setFilesOpen(false)}>
+          <div className="modal modal-file">
+            <button className="modal-x" title="关闭 (Esc)" onClick={() => setFilesOpen(false)}>
+              <Icon name="x" size={16} />
+            </button>
+            <h2 className="confirm-title">
+              <Icon name="folder" size={16} className="ico-accent" /> 文件管理
+            </h2>
+            <div className="file-path">
+              <input
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && listDir(pathInput || "~")}
+                spellCheck={false}
+              />
+              <button className="small" title="上级目录" onClick={upDir}><Icon name="chevronUp" size={12} /></button>
             <button className="small" title="刷新" onClick={() => listDir(files.path)}><Icon name="refresh" size={12} /></button>
             <button className="small" title="新建文件夹" onClick={mkdir}><Icon name="plus" size={12} /></button>
+            <button
+              className="small"
+              title="上传文件到当前目录"
+              onClick={() => document.getElementById("fm-upload-input")?.click()}
+            >
+              <Icon name="upload" size={12} />
+            </button>
+            <input
+              id="fm-upload-input"
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                uploadFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
           </div>
-          {fileError && <div className="error-text small-err">{fileError}</div>}
-          <div className="file-list">
-            {files.entries.length === 0 && <div className="dim-note">空目录</div>}
-            {files.entries.map((e) => (
-              <div key={e.name} className={`file-row ${e.dir ? "is-dir" : ""}`}>
-                <span className="file-icon" onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
-                  <Icon name={e.dir ? "folder" : "file"} size={14} className={e.dir ? "ico-dir" : "ico-file"} />
-                </span>
-                <span className="file-name" title={`${e.name} · ${e.mtime}`} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
-                  {e.name}
-                  {!e.dir && <em>{fmtSize(e.size)}</em>}
-                </span>
-                <span className="file-ops">
-                  <button className="icon-op" title={e.dir ? "打开" : "预览"} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
-                    <Icon name={e.dir ? "arrowUpRight" : "eye"} size={13} />
-                  </button>
-                  {e.dir && (
-                    <button className="icon-op" title="在终端打开（cd）" onClick={() => ipc.terminalWrite(sessionId!, new TextEncoder().encode(`cd ${q(e.name)} && ls -A\n`))}>
-                      <Icon name="terminal" size={13} />
+          {fmMsg && <div className="ok-text small-err">{fmMsg}</div>}
+            {fileError && <div className="error-text small-err">{fileError}</div>}
+            <div
+              className="file-list fm-list"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                uploadFiles(e.dataTransfer.files);
+              }}
+            >
+              {files.entries.length === 0 && <div className="dim-note">空目录</div>}
+              {files.entries.map((e) => (
+                <div key={e.name} className={`file-row ${e.dir ? "is-dir" : ""}`}>
+                  <span className="file-icon" onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
+                    <Icon name={e.dir ? "folder" : "file"} size={14} className={e.dir ? "ico-dir" : "ico-file"} />
+                  </span>
+                  <span className="file-name" title={`${e.name} · ${e.mtime}`} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
+                    {e.name}
+                    {!e.dir && <em>{fmtSize(e.size)}</em>}
+                  </span>
+                  <span className="file-ops">
+                    <button className="icon-op" title={e.dir ? "打开" : "预览"} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
+                      <Icon name={e.dir ? "arrowUpRight" : "eye"} size={13} />
                     </button>
-                  )}
-                  {e.name.endsWith(".sh") && (
-                    <button className="icon-op" title="执行脚本" onClick={() => execEntry(e)}><Icon name="play" size={13} /></button>
-                  )}
-                  <button className="icon-op" title="重命名" onClick={() => doRename(e)}><Icon name="pencil" size={13} /></button>
-                  <button className="icon-op danger" title="删除" onClick={() => doDelete(e)}><Icon name="trash" size={13} /></button>
-                </span>
-              </div>
-            ))}
+                    {e.dir && (
+                      <button className="icon-op" title="在终端打开（cd）" onClick={() => ipc.terminalWrite(sessionId!, new TextEncoder().encode(`cd ${q(e.name)} && ls -A\n`))}>
+                        <Icon name="terminal" size={13} />
+                      </button>
+                    )}
+                    {e.name.endsWith(".sh") && (
+                      <button className="icon-op" title="执行脚本" onClick={() => execEntry(e)}><Icon name="play" size={13} /></button>
+                    )}
+                    {!e.dir && e.size <= 100000 && (
+                      <button className="icon-op" title="编辑文本" onClick={() => doEdit(e)}><Icon name="squarePen" size={13} /></button>
+                    )}
+                    {!e.dir && (
+                      <button className="icon-op" title="下载（保存到应用数据目录/downloads）" onClick={() => doDownload(e)}>
+                        <Icon name="download" size={13} />
+                      </button>
+                    )}
+                    <button className="icon-op" title="重命名" onClick={() => doRename(e)}><Icon name="pencil" size={13} /></button>
+                    <button className="icon-op danger" title="删除" onClick={() => doDelete(e)}><Icon name="trash" size={13} /></button>
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-        </>
+        </div>
+      )}
+
+      {/* ---- file edit modal ---- */}
+      {editFile && (
+        <div className="modal-backdrop">
+          <div className="modal modal-file">
+            <button className="modal-x" title="关闭" onClick={() => setEditFile(null)}>
+              <Icon name="x" size={16} />
+            </button>
+            <h2 className="confirm-title">
+              <Icon name="squarePen" size={16} className="ico-accent" /> 编辑 {editFile.name}
+            </h2>
+            <div className="sub">以 UTF-8 文本编辑（≤100KB），保存将覆盖远端文件</div>
+            <textarea
+              className="sys-prompt-input"
+              rows={18}
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+              spellCheck={false}
+              style={{ fontFamily: "var(--mono)", fontSize: 12 }}
+            />
+            {editErr && <div className="error-text" style={{ marginTop: 8 }}>{editErr}</div>}
+            <div className="modal-foot">
+              <button onClick={() => setEditFile(null)}>取消</button>
+              <button className="primary" disabled={editBusy} onClick={saveEdit}>
+                {editBusy ? "保存中…" : "保存到服务器"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ---- add host modal (unchanged behavior) ---- */}
       {showAdd && (
         <div className="modal-backdrop">
-          <div className="modal">
+          <div className="modal modal-sm">
             <h2>连接主机</h2>
             <div className="sub">首次连接将展示主机指纹，需要你确认信任（TOFU）。</div>
-            <div className="form-grid">
-              <label>名称</label>
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="可选" />
-              <label>主机</label>
-              <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="192.168.1.10" />
-              <label>端口</label>
-              <input value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) || 22 })} />
-              <label>用户名</label>
-              <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-              <label>认证方式</label>
-              <select value={form.authMethod} onChange={(e) => setForm({ ...form, authMethod: e.target.value as "password" | "publickey" })}>
-                <option value="password">密码</option>
-                <option value="publickey">私钥</option>
-              </select>
-              {form.authMethod === "password" ? (
-                <>
-                  <label>密码</label>
-                  <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-                </>
-              ) : (
-                <>
-                  <label>私钥路径</label>
-                  <input value={form.keyPath} onChange={(e) => setForm({ ...form, keyPath: e.target.value })} placeholder="C:\Users\you\.ssh\id_ed25519" />
-                  <label>私钥口令</label>
-                  <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="无则留空" />
-                </>
-              )}
-            </div>
+            <HostFormFields form={form} setForm={setForm} keyBusy={keyBusy} onKeyFile={onKeyFile} />
             {err && <div className="error-text">{err}</div>}
             <div className="modal-foot">
               <button onClick={() => setShowAdd(false)}>取消</button>
               <button className="primary" disabled={!form.host || !form.username} onClick={quickConnect}>
                 连接
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- text input dialog (mkdir / rename; WebView2 has no window.prompt) ---- */}
+      {ask && (
+        <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && setAsk(null)}>
+          <div className="modal modal-sm">
+            <h2>{ask.title}</h2>
+            <div className="sub">{ask.label}</div>
+            <input
+              autoFocus
+              value={ask.value}
+              onChange={(e) => setAsk({ ...ask, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && ask.value.trim()) {
+                  const ok = ask.onOk;
+                  setAsk(null);
+                  ok(ask.value.trim());
+                } else if (e.key === "Escape") {
+                  setAsk(null);
+                }
+              }}
+              spellCheck={false}
+            />
+            <div className="modal-foot">
+              <button onClick={() => setAsk(null)}>取消</button>
+              <button
+                className="primary"
+                disabled={!ask.value.trim()}
+                onClick={() => {
+                  const ok = ask.onOk;
+                  setAsk(null);
+                  ok(ask.value.trim());
+                }}
+              >
+                确定
               </button>
             </div>
           </div>
@@ -397,6 +611,32 @@ export function ServerPanel() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// One IO metric cell: label left, value right — single metric per cell so
+// narrow panels never truncate values.
+function IOMetric({
+  label,
+  value,
+  title,
+  icon,
+  iconCls,
+}: {
+  label: string;
+  value: string;
+  title: string;
+  icon?: string;
+  iconCls?: string;
+}) {
+  return (
+    <div className="io-item" title={title}>
+      <span className="io-k">
+        {icon && <Icon name={icon} size={11} className={iconCls} />}
+        {label}
+      </span>
+      <span className="io-v">{value}</span>
     </div>
   );
 }

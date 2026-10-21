@@ -3,11 +3,16 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentPlan,
+  AgentPolicy,
+  AgentStepHistory,
   ConnectionConfig,
   DiagnosisResult,
+  ExpectSpec,
   ProviderProfile,
   ProviderSpec,
   RiskAssessment,
+  VerifyOutcome,
 } from "./types";
 
 export const ipc = {
@@ -54,6 +59,9 @@ export const ipc = {
     invoke<void>("save_profile", { profile, apiKey }),
   deleteProfile: (profileId: string) => invoke<void>("delete_profile", { profileId }),
   hasApiKey: (profileId: string) => invoke<boolean>("has_api_key", { profileId }),
+  deleteApiKey: (profileId: string) => invoke<void>("delete_api_key", { profileId }),
+  // ---- Unified credential center: SSH secrets (password / passphrase) ----
+  deleteSavedPassword: (connId: string) => invoke<void>("delete_saved_password", { connId }),
   fetchModels: (profile: ProviderProfile, apiKey: string | null) =>
     invoke<{ id: string }[]>("fetch_models", { profile, apiKey }),
   testProvider: (profile: ProviderProfile, apiKey: string | null) =>
@@ -73,13 +81,128 @@ export const ipc = {
   removeWhitelist: (command: string) => invoke<void>("remove_whitelist", { command }),
 
   // ---- Diagnosis ----
-  aiDiagnose: (sessionId: number, question: string) =>
+  aiDiagnose: (sessionId: number, question: string, profileId?: string | null) =>
     invoke<{ result: DiagnosisResult; provider: string; model: string }>("ai_diagnose", {
       sessionId,
       question,
+      profileId: profileId ?? null,
     }),
 
+  // ---- Chat mode (multi-turn, no terminal context) ----
+  aiChat: (history: { role: string; content: string }[], question: string, profileId?: string | null) =>
+    invoke<string>("ai_chat", { history, question, profileId: profileId ?? null }),
+
+  // ---- Agent mode (automated ops loop) ----
+  /** One step of the reactive loop (fallback / replanning path). */
+  agentStep: (
+    sessionId: number,
+    goal: string,
+    steps: AgentStepHistory[],
+    requireVerification?: boolean,
+    profileId?: string | null,
+  ) =>
+    invoke<{
+      action: "command" | "verify" | "done" | "giveup" | "pty";
+      command?: string;
+      description?: string;
+      reasoning?: string;
+      summary?: string;
+      reason?: string;
+      expect?: string;
+      keys?: string;
+      riskHint?: string;
+    }>("agent_step", { sessionId, goal, steps, requireVerification, profileId: profileId ?? null }),
+
+  /** Planner: ONE model call produces the whole ordered plan. */
+  agentPlan: (sessionId: number, goal: string, profileId?: string | null) =>
+    invoke<AgentPlan>("agent_plan", { sessionId, goal, profileId: profileId ?? null }),
+
+  /** Verifier: Rust decides whether a step's assertions passed. */
+  agentVerify: (expect: ExpectSpec, exitCode: number | null, output: string) =>
+    invoke<VerifyOutcome>("agent_verify", { expect, exitCode, output }),
+
+  /** Cancel the in-flight command on the agent's persistent shell. */
+  agentCancel: (sessionId: number) => invoke<void>("agent_cancel", { sessionId }),
+
+  /** Gated PTY write: the Rust side grades the payload and requires approval. */
+  agentPtyWrite: (sessionId: number, keys: string, userAck?: "approved") =>
+    invoke<string>("agent_pty_write", { sessionId, keys, userAck: userAck ?? null }),
+
+  getAgentConfig: () =>
+    invoke<{ autoGreen: boolean; agentExecTimeout: number; policy: AgentPolicy }>("get_agent_config"),
+  setAgentConfig: (autoGreen: boolean, agentExecTimeout: number, policy?: AgentPolicy) =>
+    invoke<void>("set_agent_config", { autoGreen, agentExecTimeout, policy: policy ?? null }),
+  saveAgentLog: (goal: string, status: string, steps: unknown) =>
+    invoke<string>("save_agent_log", { goal, status, steps }).catch(() => ""),
+
+  // ---- MCP server (external IDE integration) ----
+  getMcpConfig: () => invoke<{ enabled: boolean; port: number; token: string }>("get_mcp_config"),
+  setMcpConfig: (enabled: boolean, port: number) => invoke<void>("set_mcp_config", { enabled, port }),
+
+  // ---- AI system prompt (global, optional) ----
+  // ---- Prompt library (multiple named prompts, bound to modes) ----
+  listPrompts: () =>
+    invoke<{ id: string; name: string; content: string; forDiag: boolean; forChat: boolean; forAgent: boolean }[]>(
+      "list_prompts",
+    ),
+  savePrompt: (entry: {
+    id: string;
+    name: string;
+    content: string;
+    forDiag: boolean;
+    forChat: boolean;
+    forAgent: boolean;
+  }) => invoke<void>("save_prompt", { entry }),
+  deletePrompt: (id: string) => invoke<void>("delete_prompt", { id }),
+  getDiagnosisDepth: () => invoke<number>("get_diagnosis_depth"),
+  setDiagnosisDepth: (depth: number) => invoke<void>("set_diagnosis_depth", { depth }),
+
   // ---- Server dashboard (user-initiated exec on a separate channel) ----
-  execOneshot: (sessionId: number, command: string) =>
-    invoke<string>("exec_oneshot", { sessionId, command }),
+  // userAck: "approved" marks a user-authorized write command (the Rust
+  // execution layer re-grades EVERY command as the final authority; RED is
+  // always refused). Omitting it allows only GREEN (read-only) commands.
+  execOneshot: (
+    sessionId: number,
+    command: string,
+    timeoutSecs?: number,
+    userAck?: "approved",
+  ) => invoke<string>("exec_oneshot", { sessionId, command, timeoutSecs, userAck: userAck ?? null }),
+
+  // ---- Agent execution: PERSISTENT shell (cd/export survive across steps) ----
+  // Same execution-layer gate as execOneshot. Returns structured result:
+  // exitCode!=0 is DATA (AI self-corrects), not a thrown error; a thrown
+  // error means the gate refused or the channel is broken.
+  // `userAck` carries the USER's authorization ("approved"), never a
+  // frontend-derived risk level — the Rust gate re-grades by itself.
+  agentExec: (
+    sessionId: number,
+    command: string,
+    timeoutSecs?: number,
+    userAck?: "approved",
+  ) =>
+    invoke<{
+      output: string;
+      exitCode: number | null;
+      timedOut: boolean;
+      shellGone: boolean;
+      written: boolean;
+      /** The command MAY have run remotely — do NOT replay it blindly. */
+      maybeExecuted: boolean;
+      /** The shell's live cwd after the command. */
+      cwd: string | null;
+    }>("agent_exec", { sessionId, command, timeoutSecs, userAck: userAck ?? null }),
+
+  // Read terminal screen tail from the LOCAL screen model (no remote exec).
+  readScreenTail: (sessionId: number, lines?: number) =>
+    invoke<string>("read_screen_tail", { sessionId, lines }),
+
+  // ---- SFTP (user-initiated file transfer) ----
+  sftpDownload: (sessionId: number, remotePath: string) =>
+    invoke<string>("sftp_download", { sessionId, remotePath }),
+  sftpUploadData: (sessionId: number, remotePath: string, dataB64: string) =>
+    invoke<string>("sftp_upload_data", { sessionId, remotePath, dataB64 }),
+
+  // ---- Private key upload ----
+  saveUploadedKey: (name: string, content: string) =>
+    invoke<string>("save_uploaded_key", { name, content }),
 };

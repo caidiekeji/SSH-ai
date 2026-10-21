@@ -11,6 +11,14 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Constant-time string equality (timing-safe fingerprint checks).
+fn ct_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnownHostEntry {
     /// "host:port"
@@ -65,7 +73,7 @@ impl KnownHosts {
     pub fn verdict(&self, addr: &str, fingerprint: &str) -> TofuVerdict {
         match self.entries.get(addr) {
             None => TofuVerdict::Unknown,
-            Some(e) if e.fingerprint == fingerprint => TofuVerdict::Match,
+            Some(e) if ct_eq(&e.fingerprint, fingerprint) => TofuVerdict::Match,
             Some(e) => TofuVerdict::Mismatch(HostKeyMismatch {
                 addr: addr.to_string(),
                 old_fingerprint: e.fingerprint.clone(),

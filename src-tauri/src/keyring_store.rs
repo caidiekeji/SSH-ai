@@ -35,15 +35,32 @@ pub fn delete_secret(key: &str) -> Result<(), String> {
     }
 }
 
-/// Log sanitizer (PRD §5.3): replace API-key-looking strings with [REDACTED].
+/// Log sanitizer (PRD §5.3): redact sk/hex keys, Bearer tokens,
+/// Authorization headers and PEM private-key blocks. Every on-disk log
+/// path MUST go through this.
 pub fn sanitize_log(input: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
     static SK: OnceLock<Regex> = OnceLock::new();
     static HEX: OnceLock<Regex> = OnceLock::new();
+    static BEARER: OnceLock<Regex> = OnceLock::new();
+    static AUTH_HEADER: OnceLock<Regex> = OnceLock::new();
+    static PEM: OnceLock<Regex> = OnceLock::new();
     let sk = SK.get_or_init(|| Regex::new(r"sk-[A-Za-z0-9_\-]{8,}").expect("valid regex"));
     let hex = HEX.get_or_init(|| Regex::new(r"\b[a-fA-F0-9]{32,}\b").expect("valid regex"));
-    let s = sk.replace_all(input, "[REDACTED]");
+    let bearer =
+        BEARER.get_or_init(|| Regex::new("(?i)bearer\\s+[A-Za-z0-9._\\-]+").expect("valid regex"));
+    let auth = AUTH_HEADER.get_or_init(|| {
+        Regex::new("(?i)authorization[\"']?\\s*[:=]\\s*[\"']?[^\"',\r\n]+").expect("valid regex")
+    });
+    let pem = PEM.get_or_init(|| {
+        Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")
+            .expect("valid regex")
+    });
+    let s = pem.replace_all(input, "[REDACTED-PRIVATE-KEY]");
+    let s = bearer.replace_all(&s, "Bearer [REDACTED]");
+    let s = auth.replace_all(&s, "Authorization: [REDACTED]");
+    let s = sk.replace_all(&s, "[REDACTED]");
     hex.replace_all(&s, "[REDACTED]").into_owned()
 }
 

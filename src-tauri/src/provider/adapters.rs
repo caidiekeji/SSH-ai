@@ -48,8 +48,24 @@ pub trait LLMProvider: Send + Sync {
 fn client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(timeout)
-        // HC-04: direct connection only. No proxy env overrides, no redirects
-        // to foreign hosts are followed beyond default (reqwest default: 10).
+        // HC-04: direct connection only — no system/env proxy (an API key
+        // must never transit a proxy we don't control) and no redirects.
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .expect("reqwest client")
+}
+
+/// Streaming client: NO total deadline (reqwest's `timeout` covers the whole
+/// body read and would kill long SSE generations with "error decoding
+/// response body"). Instead: connect timeout + TCP keepalive here, and a
+/// per-chunk idle watchdog + wall-clock cap enforced in read_sse.
+fn stream_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .expect("reqwest client")
 }
@@ -71,16 +87,38 @@ async fn map_response_error(resp: reqwest::Response) -> ProviderError {
 }
 
 /// Parse an SSE byte stream, invoking `on_event` per data line payload.
+/// Bounded by TWO watchdogs (C5): `idle` = max gap between chunks (long
+/// model thinking pauses are normal), `total` = whole-stream wall clock.
 async fn read_sse(
     stream: impl futures::Stream<Item = reqwest::Result<bytes::Bytes>>,
     mut on_event: impl FnMut(&str),
 ) -> Result<(), ProviderError> {
+    let idle = Duration::from_secs(180); // 3 min between chunks
+    let total = Duration::from_secs(600); // 10 min whole stream
+    let started = std::time::Instant::now();
     let mut buffer = String::new();
     let mut stream = Box::pin(stream);
     loop {
-        match stream.as_mut().next().await {
-            Some(Ok(chunk)) => {
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+        match tokio::time::timeout(idle, stream.as_mut().next()).await {
+            // Idle watchdog: connection alive but silent too long.
+            Err(_) => {
+                return Err(ProviderError::StreamInterrupted(format!(
+                    "读取超时：{idle_secs} 秒内未收到任何新数据（模型长时间无响应或连接被中断）",
+                    idle_secs = idle.as_secs()
+                )));
+            }
+            Ok(Some(Ok(chunk))) => {
+                if started.elapsed() > total {
+                    return Err(ProviderError::StreamInterrupted(
+                        "流式响应总时长超过 10 分钟上限，已中止".into(),
+                    ));
+                }
+                // Normalize CRLF → LF: some vendors split SSE events with
+                // \r\n\r\n, which the "\n\n" separator match would never hit.
+                let text = String::from_utf8_lossy(&chunk)
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n");
+                buffer.push_str(&text);
                 // SSE events separated by blank lines.
                 while let Some(pos) = buffer.find("\n\n") {
                     let event_text: String = buffer.drain(..pos + 2).collect();
@@ -94,10 +132,15 @@ async fn read_sse(
                     }
                 }
             }
-            Some(Err(e)) => {
-                return Err(ProviderError::StreamInterrupted(e.to_string()));
+            Ok(Some(Err(e))) => {
+                let detail = if e.is_timeout() {
+                    "连接超时".to_string()
+                } else {
+                    e.to_string()
+                };
+                return Err(ProviderError::StreamInterrupted(detail));
             }
-            None => break,
+            Ok(None) => break,
         }
     }
     Ok(())
@@ -182,7 +225,7 @@ impl LLMProvider for OpenAIAdapter {
             "temperature": opts.temperature.unwrap_or(0.2),
             "max_tokens": opts.max_tokens.unwrap_or(2048),
         });
-        let resp = client(Duration::from_secs(60))
+        let resp = stream_client()
             .post(&url)
             .bearer_auth(&self.api_key)
             .json(&body)
@@ -273,7 +316,7 @@ impl LLMProvider for AnthropicAdapter {
             "max_tokens": opts.max_tokens.unwrap_or(2048),
             "temperature": opts.temperature.unwrap_or(0.2),
         });
-        let resp = client(Duration::from_secs(60))
+        let resp = stream_client()
             .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)

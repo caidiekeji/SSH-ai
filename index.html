@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI SSH Assistant</title>
+    <script>
+      // Apply the saved color mode before first paint to avoid a theme flash.
+      try { document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

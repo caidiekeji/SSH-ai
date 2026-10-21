@@ -6,9 +6,12 @@
 //! - HC-04: LLM traffic goes directly to the user's base_url.
 //! - HC-05: raw PTY bytes are normalized before any LLM sees them.
 
+mod agent_plan;
+mod agent_shell;
 mod ai;
 mod commands;
 mod keyring_store;
+mod mcp;
 mod pipeline;
 mod provider;
 mod safety;
@@ -24,11 +27,28 @@ use tauri::{
 
 pub fn run() {
     tauri::Builder::default()
+        // Single instance: launching the exe again focuses the existing window
+        // instead of spawning a second process (which would add a second tray icon).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app);
+        }))
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = handle.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
-            app.manage(AppState::new(handle, data_dir));
+            app.manage(AppState::new(handle.clone(), data_dir));
+
+            // MCP server (external IDE agents): start if enabled in settings.
+            {
+                let st = app.state::<AppState>();
+                let enabled = {
+                    let s = st.settings.lock().unwrap_or_else(|e| e.into_inner());
+                    s.mcp_enabled
+                };
+                if enabled {
+                    mcp::start(handle.clone());
+                }
+            }
 
             // System tray: closing the window hides to tray; quitting happens
             // only through the tray menu (user requirement #1).
@@ -76,6 +96,7 @@ pub fn run() {
             commands::save_connection,
             commands::delete_connection,
             commands::has_saved_password,
+            commands::delete_saved_password,
             // Known hosts
             commands::list_known_hosts,
             commands::remove_known_host,
@@ -96,9 +117,36 @@ pub fn run() {
             commands::remove_whitelist,
             // Diagnosis
             commands::ai_diagnose,
+            commands::ai_chat,
+            commands::agent_step,
+            commands::list_prompts,
+            commands::save_prompt,
+            commands::delete_prompt,
+            commands::get_diagnosis_depth,
+            commands::set_diagnosis_depth,
+            commands::get_agent_config,
+            commands::set_agent_config,
+            commands::save_agent_log,
+            commands::get_mcp_config,
+            commands::set_mcp_config,
+            commands::delete_api_key,
             commands::parse_preview,
             // Server dashboard (user-initiated exec, never AI-driven)
             commands::exec_oneshot,
+            // Agent execution: persistent shell (state survives across steps)
+            // + local screen observation for PTY takeover steps.
+            commands::agent_exec,
+            commands::read_screen_tail,
+            // Agent automation: plan / verify / cancel / gated PTY write.
+            commands::agent_plan,
+            commands::agent_verify,
+            commands::agent_cancel,
+            commands::agent_pty_write,
+            // SFTP (user-initiated file transfer)
+            commands::sftp_download,
+            commands::sftp_upload_data,
+            // Private key upload (file stored in app-private dir)
+            commands::save_uploaded_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

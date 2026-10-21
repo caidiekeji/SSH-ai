@@ -20,6 +20,23 @@ import type {
 
 export type ConnStatus = "disconnected" | "connecting" | "connected" | "closed" | "error";
 
+export interface TermTab {
+  sessionId: number;
+  title: string;
+  host: string;
+  status: ConnStatus;
+  /** Saved-connection args enabling auto-reconnect (connection_id required). */
+  connectArgs?: {
+    host: string;
+    port: number;
+    username: string;
+    auth: { kind: "password"; password: string } | { kind: "publickey"; key_path: string; passphrase: string | null };
+    use_saved_password?: boolean;
+    connection_id?: string;
+  };
+  reconnects?: number;
+}
+
 interface PendingPrefill {
   command: string;
   aiRiskHint: string;
@@ -35,6 +52,16 @@ interface Store {
   connections: ConnectionConfig[];
   setConn: (s: Partial<Pick<Store, "sessionId" | "connStatus" | "connError" | "activeHost">>) => void;
   loadConnections: () => Promise<void>;
+
+  // ---- multi-host tabs ----
+  tabs: TermTab[];
+  activeTabId: number | null;
+  openTab: (sessionId: number, title: string, host: string, connectArgs?: TermTab["connectArgs"]) => void;
+  switchTab: (sessionId: number) => void;
+  closeTab: (sessionId: number) => Promise<void>;
+  setTabStatus: (sessionId: number, status: ConnStatus) => void;
+  /** Auto-reconnect a closed tab (saved-password connections, ≤3 attempts). */
+  maybeReconnect: (oldSessionId: number) => Promise<void>;
 
   // ---- AI config (§2.2) ----
   aiState: AiConfigState;
@@ -68,6 +95,35 @@ interface Store {
   theme: ThemeName;
   setTheme: (t: ThemeName) => void;
 
+  // ---- composer (AI panel): cmd | diag | agent | chat ----
+  composerMode: "cmd" | "diag" | "agent" | "chat";
+  setComposerMode: (m: "cmd" | "diag" | "agent" | "chat") => void;
+
+  // ---- chat mode (multi-turn conversation) ----
+  chatHistory: { role: "user" | "assistant"; content: string }[];
+  chatBusy: boolean;
+  sendChat: (text: string) => Promise<void>;
+  appendChatChunk: (text: string) => void;
+  clearChat: () => void;
+
+  // ---- agent mode (automated ops loop) ----
+  agentStatus: "idle" | "running" | "waiting" | "done" | "failed" | "stopped";
+  agentGoal: string;
+  agentSteps: AgentStepRecord[];
+  agentApproval: AgentApproval | null;
+  agentError: string;
+  /** The plan produced by the Planner layer (null before planning). */
+  agentPlan: import("./types").AgentPlan | null;
+  /** Structured work memory: cwd / facts / hypotheses / failed attempts. */
+  agentMemory: AgentMemory;
+  _agentResolve: ((ok: boolean) => void) | null;
+  /** Run token: a fresh startAgent invalidates any previous loop. */
+  _agentRunId: number;
+  agentLoop: (runId: number) => Promise<void>;
+  startAgent: (goal: string) => void;
+  stopAgent: () => void;
+  resolveAgent: (ok: boolean) => void;
+
   // ---- server dashboard ----
   serverInfo: ServerInfo | null;
   serverError: string;
@@ -84,10 +140,112 @@ export interface DiagnosisResultPayload {
   model: string;
 }
 
+/** One executed step as shown in the Agent card. */
+export interface AgentStepRecord {
+  no: number;
+  command: string;
+  description: string;
+  output: string;
+  risk: string;
+  kind: "exec" | "verify" | "pty";
+  /** Verifier verdict for this step (undefined = not asserted). */
+  verified?: boolean;
+  /** Why the assertions failed. */
+  verifyFailures?: string[];
+}
+
+/** The approval request shown to the user. */
+export interface AgentApproval {
+  command: string;
+  description: string;
+  level: string;
+  /** Full payload for a pty write (never truncated — the preview must match
+   *  what is actually written byte for byte). */
+  fullText?: string;
+  /** Host the command will run on — the approval must say WHERE. */
+  host?: string;
+}
+
+/** Structured work memory fed back to the planner on every step. */
+export interface AgentMemory {
+  /** Live cwd of the agent's own shell. */
+  cwd: string;
+  /** Facts confirmed by a passing assertion. */
+  facts: string[];
+  /** Hypotheses that were ruled out (with the reason). */
+  hypotheses: string[];
+  /** Attempts that failed (command + why). */
+  failedAttempts: string[];
+}
+
 let cardSeq = 0;
 const nextCardId = () => `card-${Date.now()}-${cardSeq++}`;
 let lastQuestion = "";
 let diagRunning = false;
+
+// Agent run token: incremented on every startAgent; a loop whose token no
+// longer matches the current one exits instead of resurrecting (stop -> start
+// race previously let the OLD and NEW loops run in parallel).
+let agentRunSeq = 0;
+
+/**
+ * Trim command output for the model: keep head + tail + error-ish lines in
+ * the middle, with an EXPLICIT omission marker (OpenHands-style). Long
+ * outputs otherwise either get silently cut at the tail (losing the error at
+ * the top) or blow the context window.
+ */
+const trimForAi = (raw: string): string => {
+  const MAX_CHARS = 6000;
+  if (raw.length <= MAX_CHARS && raw.split("\n").length <= 60) return raw;
+  const lines = raw.split("\n");
+  const head = lines.slice(0, 12);
+  const tail = lines.slice(-30);
+  const errRe =
+    /(error|fail|fatal|traceback|exception|denied|refused|not found|no such|timeout|panic|错误|失败|拒绝|超时|不存在)/i;
+  const mid = lines.slice(12, -30).filter((l) => errRe.test(l)).slice(0, 15);
+  const omitted = Math.max(0, lines.length - head.length - tail.length - mid.length);
+  const out = [
+    ...head,
+    `…（已省略中间 ${omitted} 行，保留错误相关行与结尾）…`,
+    ...mid,
+    ...tail,
+  ].join("\n");
+  return out.length > MAX_CHARS + 500 ? out.slice(-(MAX_CHARS + 500)) : out;
+};
+
+// Human-readable rendering of a step's machine-checkable expectation, shown
+// in the Agent card so the user can see WHAT will be verified before it runs.
+const describeExpect = (e: import("./types").ExpectSpec): string => {
+  const parts: string[] = [];
+  if (e.exitCode !== null && e.exitCode !== undefined) parts.push(`退出码=${e.exitCode}`);
+  for (const c of e.contains ?? []) parts.push(`输出包含「${c}」`);
+  for (const c of e.notContains ?? []) parts.push(`输出不含「${c}」`);
+  if (e.regex) parts.push(`输出匹配 /${e.regex}/`);
+  return parts.length ? `（断言：${parts.join("；")}）` : "";
+};
+
+// Previous raw byte/sector counters (for computing per-second rates).
+let lastIoRaw: { sessionId: number; rx: number; tx: number; dr: number; dw: number; t: number } | null = null;
+
+// Retry helper for transient AI errors (network / timeout / rate limit /
+// mid-stream interruption). Auth-classified errors fail immediately.
+const RETRYABLE_AI_ERRORS = ["网络", "超时", "频率", "HTTP 5", "HTTP 429", "连接", "响应中断", "读取超时", "流式"];
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let a = 0; a < attempts; a++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e);
+      const retryable = RETRYABLE_AI_ERRORS.some((k) => msg.includes(k));
+      if (!retryable || a === attempts - 1) break;
+      // Exponential backoff + jitter: 2s, 4s (+0~800ms).
+      await new Promise((r) => setTimeout(r, 2000 * (a + 1) + Math.random() * 800));
+    }
+  }
+  throw lastErr;
+}
 
 export const useStore = create<Store>((set, get) => ({
   sessionId: null,
@@ -99,6 +257,113 @@ export const useStore = create<Store>((set, get) => ({
   loadConnections: async () => {
     const connections = await ipc.listConnections();
     set({ connections });
+  },
+
+  // ---- multi-host tabs ----
+  tabs: [],
+  activeTabId: null,
+  openTab: (sessionId, title, host, connectArgs) =>
+    set((s) => ({
+      // If this session already has a tab, just focus it (reconnect case).
+      tabs: s.tabs.some((t) => t.sessionId === sessionId)
+        ? s.tabs.map((t) => (t.sessionId === sessionId ? { ...t, status: "connected" as ConnStatus } : t))
+        : [...s.tabs, { sessionId, title, host, status: "connected" as ConnStatus, connectArgs }],
+      activeTabId: sessionId,
+      sessionId,
+      connStatus: "connected" as ConnStatus,
+      connError: "",
+      activeHost: host,
+      // Reset dashboard so the poll effect refetches for the new active tab.
+      serverInfo: null,
+      files: { path: "~", entries: [] },
+      fileError: "",
+      // Quick-error chips are per-session: drop blocks from other sessions.
+      errorBlocks: [],
+    })),
+  switchTab: (sessionId) => {
+    const t = get().tabs.find((x) => x.sessionId === sessionId);
+    if (!t) return;
+    set({
+      activeTabId: sessionId,
+      sessionId,
+      connStatus: t.status,
+      connError: "",
+      activeHost: t.host,
+      serverInfo: null,
+      files: { path: "~", entries: [] },
+      fileError: "",
+      errorBlocks: [],
+    });
+  },
+  closeTab: async (sessionId) => {
+    const { tabs, activeTabId } = get();
+    await ipc.sshDisconnect(sessionId).catch(() => {});
+    const rest = tabs.filter((t) => t.sessionId !== sessionId);
+    if (rest.length === 0) {
+      set({
+        tabs: [],
+        activeTabId: null,
+        sessionId: null,
+        connStatus: "disconnected",
+        connError: "",
+        activeHost: "",
+        serverInfo: null,
+        files: { path: "~", entries: [] },
+        errorBlocks: [],
+      });
+      return;
+    }
+    if (activeTabId === sessionId) {
+      const next = rest[rest.length - 1];
+      get().switchTab(next.sessionId);
+    }
+    set({ tabs: rest });
+  },
+  setTabStatus: (sessionId, status) => {
+    set((s) => {
+      const tabs = s.tabs.map((t) => (t.sessionId === sessionId ? { ...t, status } : t));
+      const isActive = s.activeTabId === sessionId;
+      return {
+        tabs,
+        ...(isActive ? { connStatus: status } : {}),
+      };
+    });
+    if (status === "closed") void get().maybeReconnect(sessionId);
+  },
+
+  // Auto-reconnect with exponential-ish backoff: only saved-password
+  // connections (connection_id + use_saved_password) can be re-established
+  // without user interaction. Max 3 attempts, 2s/4s/6s.
+  maybeReconnect: async (oldSessionId) => {
+    const tab = get().tabs.find((t) => t.sessionId === oldSessionId);
+    if (!tab?.connectArgs?.connection_id) return;
+    const n = tab.reconnects ?? 0;
+    if (n >= 3) return;
+    await new Promise((r) => setTimeout(r, 2000 * (n + 1)));
+    // The user may have reconnected manually while waiting.
+    const cur = get().tabs.find((t) => t.sessionId === oldSessionId);
+    if (!cur || cur.status !== "closed") return;
+    try {
+      const res = await ipc.sshConnect(tab.connectArgs);
+      ipc.sshDisconnect(oldSessionId).catch(() => {});
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.sessionId === oldSessionId
+            // Success resets the backoff counter: the limit is per-streak of
+            // failures, NOT cumulative across the tab's lifetime.
+            ? { ...t, sessionId: res.sessionId, status: "connected" as ConnStatus, reconnects: 0 }
+            : t,
+        ),
+        activeTabId: s.activeTabId === oldSessionId ? res.sessionId : s.activeTabId,
+        sessionId: s.sessionId === oldSessionId ? res.sessionId : s.sessionId,
+        ...(s.activeTabId === oldSessionId ? { activeHost: tab.host, connStatus: "connected" as ConnStatus } : {}),
+      }));
+    } catch {
+      set((s) => ({
+        tabs: s.tabs.map((t) => (t.sessionId === oldSessionId ? { ...t, reconnects: n + 1 } : t)),
+      }));
+      void get().maybeReconnect(oldSessionId);
+    }
   },
 
   // ---- AI config ----
@@ -146,7 +411,8 @@ export const useStore = create<Store>((set, get) => ({
     };
     set((s) => ({
       diagState: "T1_ANALYZING",
-      cards: [card, ...s.cards],
+      // Chat flows top-down: newest message appends at the bottom.
+      cards: [...s.cards, card],
       streamingCardId: card.id,
       diagError: "",
     }));
@@ -172,7 +438,14 @@ export const useStore = create<Store>((set, get) => ({
       diagState: "T2_RESULT",
       cards: s.cards.map((c) =>
         c.id === s.streamingCardId
-          ? { ...c, streaming: false, result: payload.result, provider: payload.provider, model: payload.model }
+          ? {
+              ...c,
+              streaming: false,
+              result: payload.result,
+              provider: payload.provider,
+              model: payload.model,
+              blocksSent: (payload as { blocksSent?: number }).blocksSent,
+            }
           : c,
       ),
       streamingCardId: null,
@@ -193,9 +466,13 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   closeCard: (id) => {
-    set((s) => ({ cards: s.cards.filter((c) => c.id !== id) }));
-    // Closing the result card returns to idle (T2 → T0).
-    set({ diagState: "T0_IDLE" });
+    // Dismissing an old card must not clobber the state machine (a streaming
+    // or active result may still be in T1/T2); only return to idle when the
+    // last card is gone.
+    set((s) => {
+      const cards = s.cards.filter((c) => c.id !== id);
+      return { cards, ...(cards.length === 0 ? { diagState: "T0_IDLE" as DiagState } : {}) };
+    });
   },
 
   requestInsert: async (_cardId, command, hint) => {
@@ -256,6 +533,406 @@ export const useStore = create<Store>((set, get) => ({
     set({ theme: t });
   },
 
+  // ---- composer modes ----
+  composerMode: "diag",
+  setComposerMode: (composerMode) => set({ composerMode }),
+
+  // ---- chat mode ----
+  chatHistory: [],
+  chatBusy: false,
+  sendChat: async (text) => {
+    if (!text.trim() || get().chatBusy) return;
+    const history = get().chatHistory.map((m) => ({ role: m.role, content: m.content }));
+    set((s) => ({
+      chatBusy: true,
+      chatHistory: [
+        ...s.chatHistory,
+        { role: "user" as const, content: text },
+        { role: "assistant" as const, content: "" },
+      ],
+    }));
+    try {
+      const reply = await ipc.aiChat(history, text);
+      // Set the final text (streaming chunks already filled it; this is the
+      // authoritative complete version).
+      set((s) => ({
+        chatBusy: false,
+        chatHistory: s.chatHistory.map((m, i) =>
+          i === s.chatHistory.length - 1 ? { ...m, content: reply || m.content } : m,
+        ),
+      }));
+    } catch (e) {
+      set((s) => ({
+        chatBusy: false,
+        chatHistory: s.chatHistory.map((m, i) =>
+          i === s.chatHistory.length - 1 ? { ...m, content: m.content || `⚠ ${String(e)}` } : m,
+        ),
+      }));
+    }
+  },
+  appendChatChunk: (text) =>
+    set((s) => ({
+      chatHistory: s.chatHistory.map((m, i) =>
+        i === s.chatHistory.length - 1 && m.role === "assistant"
+          ? { ...m, content: m.content + text }
+          : m,
+      ),
+    })),
+  clearChat: () => set({ chatHistory: [] }),
+
+  // ---- agent mode ----
+  agentStatus: "idle",
+  agentGoal: "",
+  agentSteps: [],
+  agentApproval: null,
+  agentError: "",
+  /** The plan produced by the Planner layer (null before planning). */
+  agentPlan: null,
+  /** Structured work memory: cwd / facts / hypotheses / failed attempts. */
+  agentMemory: { cwd: "", facts: [], hypotheses: [], failedAttempts: [] },
+  _agentResolve: null as ((ok: boolean) => void) | null,
+  _agentRunId: 0,
+  startAgent: (goal) => {
+    const st = get();
+    if (!st.sessionId) return set({ diagError: "请先连接主机" });
+    if (st.agentStatus === "running" || st.agentStatus === "waiting") return;
+    const runId = ++agentRunSeq;
+    set({
+      agentStatus: "running",
+      agentGoal: goal,
+      agentSteps: [],
+      agentApproval: null,
+      agentError: "",
+      _agentRunId: runId,
+    });
+    void get().agentLoop(runId);
+  },
+  agentLoop: async (runId: number) => {
+    // =========================================================================
+    // Agent automation loop — five layers:
+    //   Planner  → one model call produces the whole ordered plan
+    //   Policy   → authorization scope decides what runs unattended
+    //   Executor → runs the plan on the persistent shell
+    //   Verifier → Rust evaluates each step's assertions
+    //   State    → cwd / facts / hypotheses / failed attempts feed back
+    // =========================================================================
+    const MAX_STEPS = 24;
+
+    const audit = (status: string) => {
+      const st = get();
+      void ipc.saveAgentLog(st.agentGoal, status, st.agentSteps);
+    };
+
+    // --- sessionId is FROZEN for the whole task -------------------------------
+    // The old loop re-read `get().sessionId` every round, so switching tabs
+    // mid-task silently moved the task to ANOTHER HOST. The task now belongs
+    // to the host it was started on.
+    const sessionId = get().sessionId;
+    if (!sessionId) {
+      set({ agentStatus: "failed", agentError: "会话已断开，任务中止" });
+      audit("failed");
+      return;
+    }
+    const host = get().tabs.find((t) => t.sessionId === sessionId)?.host ?? "";
+
+    const alive = () =>
+      get()._agentRunId === runId &&
+      (get().agentStatus === "running" || get().agentStatus === "waiting");
+
+    const cfg = await ipc.getAgentConfig().catch(() => null);
+    const execTimeout = Math.min(300, Math.max(5, cfg?.agentExecTimeout ?? 60));
+    const autoGreen = cfg?.autoGreen ?? true;
+    const policy = cfg?.policy ?? "readonly";
+    const profileId = get().activeProfileId;
+    const goal = get().agentGoal;
+
+    // --- State layer: structured work memory ----------------------------------
+    const memory: AgentMemory = { cwd: "", facts: [], hypotheses: [], failedAttempts: [] };
+    const setMemory = (patch: Partial<AgentMemory>) => {
+      Object.assign(memory, patch);
+      set({ agentMemory: { ...memory } });
+    };
+
+    // --- Policy layer ---------------------------------------------------------
+    // "readonly": only read-only commands run unattended.
+    // "plan":    commands belonging to the APPROVED plan run unattended.
+    // "step":    every write command is confirmed individually.
+    let planApproved = policy === "plan";
+    const approvedCommands = new Set<string>();
+
+    // Ask the user for approval. Returns true when the command may run.
+    const requestApproval = async (
+      command: string,
+      description: string,
+      level: string,
+      fullText?: string,
+    ): Promise<boolean> => {
+      set({
+        agentStatus: "waiting",
+        agentApproval: { command, description, level, fullText, host },
+      });
+      const ok = await new Promise<boolean>((resolve) =>
+        set({ _agentResolve: resolve } as Partial<Store>),
+      );
+      if (get().agentStatus === "stopped") return false;
+      set({ agentApproval: null, agentStatus: "running" });
+      return ok;
+    };
+
+    // =====================================================================
+    // PLANNER — one model call produces the whole plan
+    // =====================================================================
+    let plan: import("./types").AgentPlan | null = null;
+    try {
+      plan = await withRetry(() => ipc.agentPlan(sessionId, goal, profileId));
+      set({ agentPlan: plan });
+    } catch (e) {
+      if (alive()) {
+        set({ agentStatus: "failed", agentError: `规划失败：${String(e)}` });
+        audit("failed");
+      }
+      return;
+    }
+    if (!alive()) return;
+    if (!plan || plan.steps.length === 0) {
+      set({ agentStatus: "failed", agentError: "AI 未产出可执行的计划" });
+      audit("failed");
+      return;
+    }
+
+    // Under the "plan" scope the user approves the WHOLE plan once, so the
+    // individual write commands do not interrupt the task step by step.
+    if (policy === "plan" && !planApproved) {
+      const summary = plan.steps
+        .map((s, i) => `${i + 1}. ${s.intent || s.command}`)
+        .join("\n");
+      const ok = await requestApproval(
+        `【执行计划】共 ${plan.steps.length} 步\n${summary}`,
+        "批准后，计划内的命令将不再逐条询问",
+        "yellow",
+      );
+      if (!ok) {
+        set({ agentStatus: "stopped", agentError: "你未批准该计划，任务已停止" });
+        audit("stopped");
+        return;
+      }
+      planApproved = true;
+      for (const s of plan.steps) approvedCommands.add(s.command);
+    }
+
+    // =====================================================================
+    // EXECUTOR + VERIFIER — run the plan, verify each step
+    // =====================================================================
+    let stepNo = 0;
+    let verifiedCount = 0;
+    let assertCount = 0;
+    let consecutiveFailures = 0;
+
+    for (const planStep of plan.steps) {
+      if (!alive()) return;
+      if (stepNo >= MAX_STEPS) break;
+
+      const command = planStep.command;
+      stepNo += 1;
+
+      // --- Policy: does this command need an individual confirmation? -------
+      let assessment: RiskAssessment;
+      try {
+        assessment = await ipc.assessRisk(command, planStep.riskHint || "read");
+      } catch {
+        assessment = {
+          level: "yellow",
+          rule: "grader-error",
+          reason: "本地分级器异常，按中风险处理",
+        };
+      }
+      if (!alive()) return;
+
+      const isGreen = assessment.level === "green";
+      const inApprovedPlan = approvedCommands.has(command);
+      if (isGreen && autoGreen) {
+        // read-only, unattended
+      } else if (inApprovedPlan && planApproved) {
+        // inside the approved plan
+      } else {
+        const ok = await requestApproval(
+          command,
+          planStep.intent || "",
+          assessment.level,
+        );
+        if (!ok) {
+          set({ agentStatus: "stopped", agentError: "你拒绝了该命令，任务已停止" });
+          audit("stopped");
+          return;
+        }
+      }
+      if (!alive()) return;
+
+      // --- Executor: run it on the persistent shell --------------------------
+      let output = "";
+      let exitCode: number | null = null;
+      let maybeExecuted = false;
+      try {
+        const resp = await ipc.agentExec(sessionId, command, execTimeout, "approved");
+        output = resp.output;
+        exitCode = resp.exitCode;
+        maybeExecuted = resp.maybeExecuted;
+        if (resp.cwd) setMemory({ cwd: resp.cwd });
+        if (resp.exitCode !== null && resp.exitCode !== 0) {
+          output += `\n（退出码 ${resp.exitCode}：命令未成功，请分析报错后再决定下一步）`;
+        }
+        if (resp.timedOut) {
+          output += "\n（命令超时：执行通道已重置，cd/export 等状态可能已丢失）";
+        } else if (resp.shellGone) {
+          output += "\n（shell 已退出：执行通道已重置，cd/export 等状态可能已丢失）";
+        }
+        if (resp.maybeExecuted) {
+          output +=
+            "\n（重要：通道在返回结果前断开，该命令可能已在远端执行。请先用只读命令核实状态，不要直接重试。）";
+        }
+        if (!output.trim()) output = "（命令执行完成，无输出）";
+      } catch (e) {
+        // Gate refusal or channel error: record it as a failed attempt so
+        // the model can change approach instead of repeating the same thing.
+        consecutiveFailures += 1;
+        const msg = `【执行被拒/失败】${String(e)}`;
+        set((s) => ({
+          agentSteps: [
+            ...s.agentSteps,
+            { no: stepNo, command, description: planStep.intent || "", output: msg, risk: assessment.level, kind: "exec" },
+          ],
+        }));
+        memory.failedAttempts.push(`${command} → ${String(e)}`);
+        setMemory({});
+        if (consecutiveFailures >= 3) {
+          set({ agentStatus: "failed", agentError: `连续 ${consecutiveFailures} 次执行失败，任务中止：${String(e)}` });
+          audit("failed");
+          return;
+        }
+        continue;
+      }
+
+      // --- Verifier: Rust decides whether the assertions hold ---------------
+      let verified: boolean | undefined;
+      let verifyFailures: string[] = [];
+      const hasExpect =
+        planStep.expect &&
+        (planStep.expect.exitCode !== null &&
+          planStep.expect.exitCode !== undefined ||
+          (planStep.expect.contains?.length ?? 0) > 0 ||
+          (planStep.expect.notContains?.length ?? 0) > 0 ||
+          !!planStep.expect.regex);
+      if (hasExpect) {
+        assertCount += 1;
+        try {
+          const outcome = await ipc.agentVerify(planStep.expect, exitCode, output);
+          verified = outcome.passed;
+          verifyFailures = outcome.failures;
+        } catch (e) {
+          verified = false;
+          verifyFailures = [`断言校验失败：${String(e)}`];
+        }
+        if (verified) {
+          verifiedCount += 1;
+          memory.facts.push(`${planStep.intent || command} → 断言通过`);
+        } else {
+          memory.hypotheses.push(
+            `${planStep.intent || command} → 断言未通过（${verifyFailures.join("；") || "输出与预期不符"}）`,
+          );
+        }
+        setMemory({});
+      }
+
+      const kind: "exec" | "verify" = hasExpect ? "verify" : "exec";
+      const desc = hasExpect
+        ? `${planStep.intent || "验证"}${describeExpect(planStep.expect)}`
+        : planStep.intent || "";
+      set((s) => ({
+        agentSteps: [
+          ...s.agentSteps,
+          {
+            no: stepNo,
+            command,
+            description: desc,
+            output: trimForAi(output),
+            risk: assessment.level,
+            kind,
+            verified,
+            verifyFailures: verifyFailures.length ? verifyFailures : undefined,
+          },
+        ],
+      }));
+
+      // A step that ran but did not satisfy its assertions is a REAL failure:
+      // count it towards the consecutive-failure breaker.
+      if (verified === false || (verified === undefined && exitCode !== null && exitCode !== 0)) {
+        consecutiveFailures += 1;
+        memory.failedAttempts.push(
+          `${command} → ${verified === false ? verifyFailures.join("；") : `退出码 ${exitCode}`}`,
+        );
+        setMemory({});
+        if (consecutiveFailures >= 3) {
+          set({
+            agentStatus: "failed",
+            agentError: `连续 ${consecutiveFailures} 步未达成预期，任务中止：${
+              memory.failedAttempts[memory.failedAttempts.length - 1]
+            }`,
+          });
+          audit("failed");
+          return;
+        }
+      } else {
+        consecutiveFailures = 0;
+      }
+
+      // The command may have executed remotely before the channel died —
+      // replaying it would run it twice. Stop and let the user decide.
+      if (maybeExecuted) {
+        set({
+          agentStatus: "failed",
+          agentError:
+            "通道在返回结果前断开：最后一条命令可能已在远端执行。为避免重复执行，任务已中止，请人工核实状态。",
+        });
+        audit("failed");
+        return;
+      }
+    }
+
+    // =====================================================================
+    // Completion gate — a claim of success needs ASSERTION EVIDENCE
+    // =====================================================================
+    if (assertCount === 0) {
+      set({
+        agentStatus: "failed",
+        agentError: "计划中没有可校验的验证步骤，无法确认目标是否达成，任务中止。请人工核对。",
+      });
+      audit("failed");
+      return;
+    }
+    if (verifiedCount === 0) {
+      set({
+        agentStatus: "failed",
+        agentError: "所有验证步骤的断言均未通过，无法确认目标已达成，任务中止。请人工核对。",
+      });
+      audit("failed");
+      return;
+    }
+    set({ agentStatus: "done" });
+    audit("done");
+  },
+  stopAgent: () => {
+    const resolve = get()._agentResolve;
+    set({ agentStatus: "stopped", agentApproval: null, _agentResolve: null });
+    resolve?.(false);
+    const st = get();
+    if (st.agentSteps.length > 0) void ipc.saveAgentLog(st.agentGoal, "stopped", st.agentSteps);
+  },
+  resolveAgent: (ok) => {
+    const resolve = get()._agentResolve;
+    set({ _agentResolve: null });
+    resolve?.(ok);
+  },
+
   // ---- server dashboard ----
   serverInfo: null,
   serverError: "",
@@ -265,29 +942,60 @@ export const useStore = create<Store>((set, get) => ({
   refreshServer: async () => {
     const { sessionId } = get();
     if (!sessionId) return;
-    // Single POSIX probe: memory / disk / load / cores / uptime.
+    // Single POSIX probe: memory / swap / disk / load / cores / uptime /
+    // network bytes (all non-LO IFs) / root-disk sectors read+written.
+    // NOTE: must stay GREEN under the Rust execution gate (read-only
+    // segments + no `$(...)` substitution). DISKIO reads /proc/mounts +
+    // /proc/diskstats in ONE awk instead of `d=$(df …)` — command
+    // substitution would force YELLOW and the gate would refuse it.
     const probe =
-      "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3}'; " +
+      "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3\" \"$7}'; " +
+      "echo @SWAP; free -b | awk 'NR==3{print $2\" \"$3}'; " +
       "echo @DISK; df -B1 / | awk 'NR==2{print $2\" \"$3}'; " +
+      "echo @NET; awk 'NR<3{next} $1!=\"lo:\" {rx+=$2; tx+=$10} END{print rx+0\" \"tx+0}' /proc/net/dev; " +
+      "echo @DISKIO; awk 'FNR==NR{ if ($2==\"/\") { d=$1; sub(/.*\\//,\"\",d) } next } " +
+      "{ b=d; sub(/[0-9]+$/,\"\",b); if ($3==d && !e) { e=$6\" \"$10 } " +
+      "else if ($3==b && !p) { p=$6\" \"$10 } } " +
+      "END{ if (e) print e; else if (p) print p; else print \"\" }' /proc/mounts /proc/diskstats; " +
       "echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; " +
       "echo @CORES; nproc 2>/dev/null || echo 1; " +
-      "echo @UPTIME; uptime -p 2>/dev/null | sed 's/^up //'";
+      "echo @UPTIME; uptime -p 2>/dev/null | cut -c4-";
     try {
       const out = await ipc.execOneshot(sessionId, probe);
       const sec = (tag: string) => {
         const m = out.match(new RegExp(`@${tag}\\n([^\\n]*)`));
         return m ? m[1].trim() : "";
       };
-      const [memT, memU] = sec("MEM").split(" ").map(Number);
-      const [dskT, dskU] = sec("DISK").split(" ").map(Number);
-      const [l1, l5] = sec("LOAD").split(" ").map(Number);
+      const [memT, memU, memA] = sec("MEM").split(/\s+/).map(Number);
+      const [swapT, swapU] = sec("SWAP").split(/\s+/).map(Number);
+      const [dskT, dskU] = sec("DISK").split(/\s+/).map(Number);
+      const [l1, l5] = sec("LOAD").split(/\s+/).map(Number);
       const cores = Number(sec("CORES")) || 1;
+      const [rxRaw, txRaw] = sec("NET").split(/\s+/).map(Number);
+      const [dReadRaw, dWriteRaw] = sec("DISKIO").split(/\s+/).map(Number);
+
+      // Rates: diff cumulative counters between two samples (<20s apart).
+      const now = Date.now();
+      const prev = lastIoRaw;
+      lastIoRaw = { sessionId, rx: rxRaw || 0, tx: txRaw || 0, dr: dReadRaw || 0, dw: dWriteRaw || 0, t: now };
+      const rate = (cur: number, old: number) =>
+        prev && prev.sessionId === sessionId && cur >= old && now - prev.t > 0 && now - prev.t < 20000
+          ? (cur - old) / ((now - prev.t) / 1000)
+          : 0;
+
       set({
         serverInfo: {
           memTotal: memT || 0,
           memUsed: memU || 0,
+          memAvailable: memA || 0,
+          swapTotal: swapT || 0,
+          swapUsed: swapU || 0,
           diskTotal: dskT || 0,
           diskUsed: dskU || 0,
+          diskReadRate: rate(dReadRaw || 0, prev?.dr ?? 0) * 512, // sectors → bytes
+          diskWriteRate: rate(dWriteRaw || 0, prev?.dw ?? 0) * 512,
+          netRxRate: rate(rxRaw || 0, prev?.rx ?? 0),
+          netTxRate: rate(txRaw || 0, prev?.tx ?? 0),
           load1: l1 || 0,
           load5: l5 || 0,
           cores,
@@ -309,9 +1017,11 @@ export const useStore = create<Store>((set, get) => ({
     const qdir =
       path === "~" ? '"$HOME"' : path.startsWith("~/") ? '"$HOME' + rest + '"' : "'" + path.replace(/'/g, "'\\''") + "'";
     // -A all-but-dotfiles, -p dir suffix, long-iso time, size + name only.
+    // Must stay GREEN under the execution gate: no `$(pwd)` substitution
+    // (a separate `pwd` segment instead) and only whitelisted segments.
     const probe =
-      `cd -- ${qdir} 2>/dev/null || { echo @ERR; exit 0; }; echo "@CWD\n$(pwd)"; ` +
-      `echo "@LS"; ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'`;
+      `cd -- ${qdir} 2>/dev/null || { echo @ERR; exit 0; }; echo @CWD; pwd; ` +
+      `echo @LS; ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'`;
     try {
       const out = await ipc.execOneshot(sessionId, probe);
       if (out.startsWith("@ERR")) {
@@ -347,6 +1057,10 @@ export const useStore = create<Store>((set, get) => ({
   runOp: async (command) => {
     const { sessionId } = get();
     if (!sessionId) throw new Error("未连接主机");
-    return ipc.execOneshot(sessionId, command);
+    // File-browser operations are triggered by an explicit user action in the
+    // UI (create/rename/delete/save/run) — that click is the authorization
+    // for YELLOW writes. The Rust execution gate still re-grades every
+    // command and unconditionally refuses RED.
+    return ipc.execOneshot(sessionId, command, undefined, "approved");
   },
 }));

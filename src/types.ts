@@ -58,6 +58,8 @@ export interface DiagnosisCard {
   streamingText: string;
   result?: DiagnosisResult;
   error?: string;
+  /** How many recent terminal output blocks were sent to the AI. */
+  blocksSent?: number;
 }
 
 export interface ErrorBlockEvent {
@@ -78,6 +80,7 @@ export interface ConnectionConfig {
   username: string;
   auth_method: "password" | "publickey";
   key_path?: string | null;
+  group?: string;
 }
 
 // ---- State machines (PRD §2.2 / §2.3) ----
@@ -106,8 +109,17 @@ export type DiagState =
 export interface ServerInfo {
   memTotal: number;
   memUsed: number;
+  /** free -b available column (RAM available for new processes). */
+  memAvailable: number;
+  swapTotal: number;
+  swapUsed: number;
   diskTotal: number;
   diskUsed: number;
+  /** Computed rates between polls (bytes/s), 0 on first sample. */
+  diskReadRate: number;
+  diskWriteRate: number;
+  netRxRate: number;
+  netTxRate: number;
   load1: number;
   load5: number;
   cores: number;
@@ -122,3 +134,47 @@ export interface FileEntry {
 }
 
 export type ThemeName = "dark" | "light" | "ocean" | "forest" | "sakura";
+
+// ---- Agent automation: Plan / Policy / Verify / State ----
+
+/** Machine-checkable expectation for one plan step (all present fields must hold). */
+export interface ExpectSpec {
+  exitCode?: number | null;
+  contains?: string[];
+  notContains?: string[];
+  regex?: string | null;
+}
+
+export interface PlanStep {
+  id: number;
+  intent: string;
+  command: string;
+  expect: ExpectSpec;
+  riskHint: string;
+  dependsOn: number[];
+}
+
+export interface AgentPlan {
+  steps: PlanStep[];
+}
+
+/** Verifier verdict — decided by Rust, never by the model. */
+export interface VerifyOutcome {
+  passed: boolean;
+  failures: string[];
+  checked: number;
+}
+
+/** Authorization scope for write operations. */
+export type AgentPolicy = "readonly" | "plan" | "step";
+
+/** One executed step fed back to the model (kind/expectation included). */
+export interface AgentStepHistory {
+  command: string;
+  output: string;
+  kind: string;
+  description: string;
+  expect: string;
+  verified?: boolean | null;
+  exitCode?: number | null;
+}

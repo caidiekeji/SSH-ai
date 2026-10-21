@@ -23,6 +23,85 @@ pub struct ConnectionConfig {
     pub auth_method: String,
     #[serde(default)]
     pub key_path: Option<String>,
+    /// Optional group label for the session list (e.g. "生产环境").
+    #[serde(default)]
+    pub group: String,
+}
+
+/// One named prompt in the prompt library. A prompt can target the
+/// diagnosis mode, the chat mode, or both; all prompts enabled for a mode
+/// are joined as that mode's custom directive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptEntry {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub for_diag: bool,
+    #[serde(default)]
+    pub for_chat: bool,
+    #[serde(default)]
+    pub for_agent: bool,
+}
+
+/// Global app settings (non-sensitive). `prompts` is the prompt library;
+/// `system_prompt`/`prompt_for_*` are legacy fields kept only to migrate the
+/// pre-library single prompt on first read. `diagnosis_depth`: how many
+/// recent command-output blocks one-click diagnosis feeds to the AI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppSettings {
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default = "default_diagnosis_depth")]
+    pub diagnosis_depth: u32,
+    #[serde(default = "default_true")]
+    pub prompt_for_diag: bool,
+    #[serde(default = "default_true")]
+    pub prompt_for_chat: bool,
+    #[serde(default)]
+    pub prompts: Vec<PromptEntry>,
+    /// Agent mode: auto-execute green (low-risk) commands without approval.
+    #[serde(default = "default_true")]
+    pub agent_auto_green: bool,
+    /// Agent mode: per-command exec timeout in seconds (5..=300).
+    #[serde(default = "default_agent_exec_timeout")]
+    pub agent_exec_timeout: u64,
+    /// Agent mode: authorization scope for planned write operations.
+    ///
+    /// * `"readonly"` — only read-only commands run unattended (default);
+    /// * `"plan"`   — commands that are part of the APPROVED plan run
+    ///   unattended, anything outside it is confirmed individually;
+    /// * `"step"`   — every write command is confirmed individually.
+    #[serde(default = "default_agent_policy")]
+    pub agent_policy: String,
+    /// MCP server (for external IDEs): enable flag, bind port, bearer token.
+    #[serde(default)]
+    pub mcp_enabled: bool,
+    #[serde(default = "default_mcp_port")]
+    pub mcp_port: u16,
+    #[serde(default)]
+    pub mcp_token: String,
+}
+
+fn default_diagnosis_depth() -> u32 {
+    1
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_agent_exec_timeout() -> u64 {
+    60
+}
+
+fn default_agent_policy() -> String {
+    "readonly".into()
+}
+
+fn default_mcp_port() -> u16 {
+    8615
 }
 
 pub struct AppState {
@@ -38,6 +117,7 @@ pub struct AppState {
     /// Pending TOFU decision: the russh handler parks here while the UI asks
     /// the user to trust an unknown host key. Resolved by host_key_respond.
     pub pending_hostkey: tokio::sync::Mutex<Option<PendingHostKey>>,
+    pub settings: Mutex<AppSettings>,
 }
 
 pub struct PendingHostKey {
@@ -52,6 +132,7 @@ impl AppState {
         let whitelist_file = data_dir.join("command_whitelist.json");
         let profiles = load_json_or(&data_dir.join("profiles.json"), Vec::new());
         let connections = load_json_or(&data_dir.join("connections.json"), Vec::new());
+        let settings = load_json_or(&data_dir.join("settings.json"), AppSettings::default());
 
         // Load user whitelist into the risk engine.
         let risk = RiskEngine::default();
@@ -69,6 +150,7 @@ impl AppState {
             whitelist_file,
             risk,
             pending_hostkey: tokio::sync::Mutex::new(None),
+            settings: Mutex::new(settings),
         }
     }
 
@@ -89,6 +171,67 @@ impl AppState {
     pub fn save_whitelist(&self) -> Result<(), String> {
         let wl = self.risk.whitelist.lock().unwrap_or_else(|e| e.into_inner());
         save_json(&self.whitelist_file, &*wl)
+    }
+
+    pub fn save_settings(&self) -> Result<(), String> {
+        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        save_json(&self.data_dir.join("settings.json"), &*settings)
+    }
+
+    /// Trimmed custom system prompt; empty string means "use default only".
+    pub fn system_prompt(&self) -> String {
+        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.system_prompt.trim().to_string()
+    }
+
+    /// Number of recent output blocks diagnosis sends to the AI (1..=10).
+    pub fn diagnosis_depth(&self) -> u32 {
+        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.diagnosis_depth.clamp(1, 10)
+    }
+
+    /// Custom prompt for diagnosis mode: all library prompts enabled for
+    /// 诊断 joined (None when empty). Legacy single prompt is migrated by
+    /// the list_prompts command, so this only reads the library.
+    pub fn diag_prompt(&self) -> Option<String> {
+        Self::join_prompts(&self.settings.lock().unwrap_or_else(|e| e.into_inner()).prompts, true)
+    }
+
+    /// Custom prompt for chat mode (same join rule, 对话 flag).
+    pub fn chat_prompt(&self) -> Option<String> {
+        Self::join_prompts(&self.settings.lock().unwrap_or_else(|e| e.into_inner()).prompts, false)
+    }
+
+    /// Custom style directive for Agent mode (joined onto the built-in
+    /// agent schema prompt as 用户偏好; the JSON schema stays authoritative).
+    pub fn agent_prompt(&self) -> Option<String> {
+        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let joined: Vec<&str> = s
+            .prompts
+            .iter()
+            .filter(|p| p.for_agent)
+            .map(|p| p.content.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined.join("\n\n").chars().take(1000).collect())
+        }
+    }
+
+    fn join_prompts(prompts: &[PromptEntry], for_diag: bool) -> Option<String> {
+        let joined: Vec<&str> = prompts
+            .iter()
+            .filter(|p| if for_diag { p.for_diag } else { p.for_chat })
+            .map(|p| p.content.trim())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined.join("\n\n").chars().take(4000).collect())
+        }
     }
 
     pub fn emit(&self, event: &str, payload: impl serde::Serialize + Clone) {
