@@ -135,15 +135,17 @@ fn find_sentinel(buf: &[u8]) -> Option<(i32, Option<String>, usize)> {
             .and_then(|s| s.trim().parse::<i32>().ok());
         let Some(code) = parsed else {
             // Not a numeric frame (e.g. program output mimicking the marker):
-            // keep looking for an older complete frame.
-            search_from = start + SENTINEL_HEAD.len();
+            // keep looking for an older complete frame. Advance by ONE byte —
+            // advancing past the whole head would let the same head match
+            // again (its window still fits), spinning forever.
+            search_from = start + 1;
             continue;
         };
         let after_code = &rest[code_end + 1..];
         if after_code.len() < PWD_HEAD.len() || &after_code[..PWD_HEAD.len()] != PWD_HEAD {
             // This head is not followed by a cwd frame — keep looking for an
-            // older complete frame.
-            search_from = start + SENTINEL_HEAD.len();
+            // older complete frame (same one-byte advance rule as above).
+            search_from = start + 1;
             continue;
         }
         let pwd_body = &after_code[PWD_HEAD.len()..];
