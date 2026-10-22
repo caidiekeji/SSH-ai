@@ -194,8 +194,67 @@ fn read_rules() -> &'static Vec<Rule> {
             mk(r"^(echo|printf)\b[^>]*$"),
             mk(r"^git\s+(status|log|diff|show|branch|remote|blame)\b"),
             mk(r"^uname\b|^lsb_release\b|^cat\s+/etc/os-release\b"),
+            // Pure state navigation / byte shuffling — no side effects beyond
+            // the current (often one-shot) shell. Powers the built-in server
+            // dashboard and file browser probes.
+            mk(r"^(pwd|cd|nproc|cut|exit|true|false)\b"),
+            // `{ echo x; }` group fragments and the closing brace produced by
+            // quote-aware segment splitting; the leading word is still graded
+            // by its own whitelist rule above.
+            mk(r"^\{\s*(echo|printf)\b|^\}$"),
+            // Shell test(1) / `[ … ]` bracket test — comparison only,
+            // cannot write. `test` needs no closing bracket; `[` does.
+            mk(r"^test\b|^\[.*\]$"),
+            // awk is powerful enough to run commands — allowed only when the
+            // script shows no dangerous feature (see `awk_dangerous`), which
+            // the caller checks before consulting this whitelist.
+            mk(r"^awk\b"),
         ]
     })
+}
+
+/// True when EVERY redirect target in `cmd` is a sink — `/dev/null` or an fd
+/// duplicate (`2>&1`). Discarding output writes nothing, so this must not be
+/// graded as a file write (the probe commands rely on `2>/dev/null`).
+/// Returns `false` when there is no redirect at all (caller only uses this
+/// to excuse the redirect-write rule, so that never happens in practice).
+fn redirect_only_sinks(cmd: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r">>?\s*(\S+)").expect("valid redirect regex"));
+    let mut found = false;
+    for cap in re.captures_iter(cmd) {
+        found = true;
+        match cap.get(1).map(|m| m.as_str()) {
+            // `/dev/null` discards; `&1`/`&2` duplicate a stream. A bare
+            // `>2` would create a FILE named "2" — never excused.
+            Some("/dev/null") | Some("&1") | Some("&2") => {}
+            _ => return false,
+        }
+    }
+    found
+}
+
+/// awk can execute commands (`system`, `getline cmd`), write files (redirect)
+/// and pipe to programs (`|`). A script containing any of those features is
+/// NOT read-only and must fall through to the conservative YELLOW default.
+/// Pure text processing (`awk 'NR==2{print $1}'`) stays GREEN.
+fn awk_dangerous(cmd: &str) -> bool {
+    if cmd.contains("system(")
+        || cmd.contains("getline")
+        || cmd.contains(">>")
+        || cmd.contains('|')
+        || cmd.contains('`')
+        || cmd.contains("$(")
+    {
+        return true;
+    }
+    // `print … > file` style redirections (a bare `>` comparison like
+    // `NR>2` only matters when it follows print/printf — err on the safe
+    // side: any print-then-> sequence disqualifies the GREEN path).
+    static PRINT_GT: OnceLock<Regex> = OnceLock::new();
+    let re = PRINT_GT
+        .get_or_init(|| Regex::new(r"(print|printf)[^;}]*>").expect("valid print-redirect regex"));
+    re.is_match(cmd)
 }
 
 /// User whitelist: EXACT string match only. Never overrides the blacklist
@@ -212,6 +271,36 @@ impl Default for RiskEngine {
     }
 }
 
+/// Destructive-command patterns that must not be downgradeable through
+/// variable indirection.
+///
+/// The blacklist is a literal matcher, so `rm -rf $d/` (where `d=/`) is not
+/// caught by the literal `/` rules — but it is exactly as destructive. These
+/// rules therefore fire on the DANGEROUS VERB combined with ANY variable
+/// reference, regardless of what the variable expands to.
+fn destructive_var_rules() -> &'static Vec<Rule> {
+    static R: OnceLock<Vec<Rule>> = OnceLock::new();
+    R.get_or_init(|| {
+        let mk = |name: &'static str, pat: &str, reason: &'static str| Rule {
+            name,
+            re: Regex::new(pat).expect("valid destructive-var regex"),
+            reason,
+        };
+        vec![
+            mk(
+                "destructive-var",
+                r"(rm|shred|truncate|mv|dd|chmod|chown)\b[^\n;|&]*(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)",
+                "破坏性操作通过变量间接引用目标，无法静态确认其影响范围",
+            ),
+            mk(
+                "destructive-var-rm",
+                r"\brm\b[^\n;|&]*(-[a-zA-Z]*[rf][a-zA-Z]*)[^\n;|&]*(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)",
+                "递归/强制删除通过变量间接引用目标，无法静态确认其影响范围",
+            ),
+        ]
+    })
+}
+
 impl RiskEngine {
     /// Layered grading (PRD §5.5). `ai_risk_hint` is accepted ONLY for the
     /// report; it can never influence the level.
@@ -226,22 +315,22 @@ impl RiskEngine {
         let cmd = command.trim();
         let _ = ai_risk_hint; // explicitly unused for the decision
 
-        // Layer 5 (inverted priority): user whitelist — exact FULL-command
-        // match only, still subject to the blacklist below.
-        {
-            let wl = self.whitelist.lock().unwrap_or_else(|e| e.into_inner());
-            if wl.iter().any(|w| w == cmd) {
+        // Layer 1 applies to the WHOLE command (blacklist regexes match
+        // substrings, so chained payload after a benign prefix is still RED).
+        // The blacklist ALWAYS wins — checked before the user whitelist so
+        // whitelisting a blacklisted pattern cannot downgrade RED (PRD §5.5).
+        for r in blacklist() {
+            if r.re.is_match(cmd) {
                 return RiskAssessment {
-                    level: RiskLevel::Green,
-                    rule: "user-whitelist".into(),
-                    reason: "用户白名单（精确匹配）".into(),
+                    level: RiskLevel::Red,
+                    rule: r.name.to_string(),
+                    reason: r.reason.to_string(),
                 };
             }
         }
-
-        // Layer 1 applies to the WHOLE command (blacklist regexes match
-        // substrings, so chained payload after a benign prefix is still RED).
-        for r in blacklist() {
+        // Destructive verbs reached through a variable cannot be proven safe
+        // by literal matching — they are RED, never YELLOW.
+        for r in destructive_var_rules() {
             if r.re.is_match(cmd) {
                 return RiskAssessment {
                     level: RiskLevel::Red,
@@ -283,6 +372,19 @@ impl RiskEngine {
             worst_rule = "command-substitution".into();
             worst_reason = "包含命令替换 $() 或反引号，按中风险处理".into();
         }
+        // Layer 5: user whitelist — exact FULL-command match only. It SKIPS
+        // the confirmation (worst < RED) but never overrides a blacklist hit:
+        // blacklisted patterns stay RED even if explicitly whitelisted.
+        if worst < RiskLevel::Red {
+            let wl = self.whitelist.lock().unwrap_or_else(|e| e.into_inner());
+            if wl.iter().any(|w| w == cmd) {
+                return RiskAssessment {
+                    level: RiskLevel::Green,
+                    rule: "user-whitelist".into(),
+                    reason: "用户白名单（精确匹配）".into(),
+                };
+            }
+        }
         RiskAssessment {
             level: worst,
             rule: worst_rule,
@@ -317,6 +419,13 @@ impl RiskEngine {
         // read whitelist so `cat x > /tmp/y` cannot green-light a redirect.
         for r in write_rules() {
             if r.re.is_match(cmd) {
+                // Discarding output is NOT a file write: `cmd 2>/dev/null`,
+                // `>/dev/null`, `2>&1` etc. leave no side effect. Only the
+                // redirect-write rule gets this exemption — every other
+                // write pattern (cp/rm/chmod/…) is unaffected.
+                if r.name == "redirect-write" && redirect_only_sinks(cmd) {
+                    continue;
+                }
                 return RiskAssessment {
                     level: RiskLevel::Yellow,
                     rule: r.name.to_string(),
@@ -326,10 +435,12 @@ impl RiskEngine {
         }
 
         // Layer 3: read-only whitelist (GREEN). find(1) is only read-only
-        // WITHOUT -delete / -exec; guard it.
+        // WITHOUT -delete / -exec; guard it. awk can run arbitrary commands
+        // (system()/getline/redirects/pipes) — guard it the same way.
         let find_guarded =
             cmd.starts_with("find ") && (cmd.contains("-delete") || cmd.contains("-exec"));
-        if !find_guarded {
+        let awk_guarded = cmd.starts_with("awk") && awk_dangerous(cmd);
+        if !find_guarded && !awk_guarded {
             for r in read_rules() {
                 if r.re.is_match(cmd) {
                     return RiskAssessment {
@@ -560,8 +671,14 @@ mod tests {
 
     #[test]
     fn unbalanced_quotes_conservative() {
-        let a = grade("echo 'unclosed; rm -rf /", "read");
+        // Unparseable structure without blacklist content → conservative
+        // YELLOW (the unparseable path runs after the whole-string blacklist
+        // pass, so blacklist content can never be downgraded this way).
+        let a = grade("echo 'unclosed; ls -la", "read");
         assert_eq!(a.level, RiskLevel::Yellow);
+        // Hiding a blacklisted pattern behind an unclosed quote stays RED.
+        let b = grade("echo 'unclosed; rm -rf /", "read");
+        assert_eq!(b.level, RiskLevel::Red);
     }
 
     #[test]
@@ -569,5 +686,154 @@ mod tests {
         // The semicolon lives inside quotes: single ls command stays GREEN.
         let a = grade("ls 'a;b.txt'", "");
         assert_eq!(a.level, RiskLevel::Green);
+    }
+
+    // ---- built-in probe regressions (dashboard / file browser) ----
+    // These are the exact command shapes shipped in src/store.ts. The
+    // execution gate re-grades them on every call, so a rule change that
+    // turns them YELLOW silently breaks the server dashboard and file list.
+
+    #[test]
+    fn devnull_redirect_is_not_a_write() {
+        for cmd in [
+            "ls -la /tmp 2>/dev/null",
+            "cat /etc/hosts > /dev/null",
+            "nproc 2>/dev/null || echo 1",
+            "uptime -p 2>/dev/null",
+        ] {
+            let a = grade(cmd, "");
+            assert_eq!(a.level, RiskLevel::Green, "expected GREEN for: {cmd}");
+        }
+        // Real file targets keep the YELLOW write classification.
+        for cmd in [
+            "echo hello > /tmp/x",
+            "cat /etc/hosts >> /var/log/h.log",
+            "ls > /etc/cron.d/evil",
+            "ls >2", // a file literally named "2" is still a write
+        ] {
+            let a = grade(cmd, "");
+            assert_eq!(a.level, RiskLevel::Yellow, "expected YELLOW for: {cmd}");
+        }
+    }
+
+    #[test]
+    fn builtin_nav_and_tools_whitelisted() {
+        for cmd in [
+            "pwd",
+            "cd /var/log",
+            "nproc",
+            "cut -d' ' -f1-3 /proc/loadavg",
+            "exit 0",
+            "[ -f /etc/hosts ]",
+            "test -d /usr",
+        ] {
+            let a = grade(cmd, "");
+            assert_eq!(a.level, RiskLevel::Green, "expected GREEN for: {cmd}");
+        }
+    }
+
+    #[test]
+    fn awk_guarded_by_danger_features() {
+        // Pure text processing is read-only.
+        let ok = grade("awk 'NR==2{print $2\" \"$3}' /proc/meminfo", "");
+        assert_eq!(ok.level, RiskLevel::Green);
+        // Command execution / pipes / redirects disqualify GREEN.
+        for cmd in [
+            "awk 'BEGIN{system(\"id\")}'",
+            "awk '{print | \"sh\"}' x",
+            "awk '{print $1 > \"/tmp/f\"}' x",
+        ] {
+            let a = grade(cmd, "");
+            assert_eq!(a.level, RiskLevel::Yellow, "expected YELLOW for: {cmd}");
+        }
+        // Blacklist patterns inside an awk string are caught by the
+        // whole-string blacklist pass BEFORE the awk guard ever runs —
+        // that is strictly stronger than YELLOW.
+        let r = grade("awk 'NR{cmd=\"rm -rf /\"}' x", "");
+        assert_eq!(r.level, RiskLevel::Red);
+    }
+
+    #[test]
+    fn dashboard_probe_is_green() {
+        // src/store.ts `loadServerInfo` probe, rewritten without `$()`.
+        let probe = "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3\" \"$7}'; \
+             echo @SWAP; free -b | awk 'NR==3{print $2\" \"$3}'; \
+             echo @DISK; df -B1 / | awk 'NR==2{print $2\" \"$3}'; \
+             echo @NET; awk 'NR<3{next} $1!=\"lo:\" {rx+=$2; tx+=$10} END{print rx+0\" \"tx+0}' /proc/net/dev; \
+             echo @DISKIO; awk 'FNR==NR{ if ($2==\"/\") { d=$1; sub(/.*\\//,\"\",d) } next } \
+             { b=d; sub(/[0-9]+$/,\"\",b); if ($3==d && !e) { e=$6\" \"$10 } \
+             else if ($3==b && !p) { p=$6\" \"$10 } } \
+             END{ if (e) print e; else if (p) print p; else print \"\" }' /proc/mounts /proc/diskstats; \
+             echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; \
+             echo @CORES; nproc 2>/dev/null || echo 1; \
+             echo @UPTIME; uptime -p | cut -c4-";
+        let a = grade(probe, "");
+        assert_eq!(
+            a.level,
+            RiskLevel::Green,
+            "dashboard probe must stay GREEN (rule={}, reason={})",
+            a.rule,
+            a.reason
+        );
+    }
+
+    #[test]
+    fn listdir_probe_is_green() {
+        // src/store.ts `listDir` probe: `$(pwd)` replaced by a plain `pwd`
+        // segment; the `{ echo @ERR; exit 0; }` fallback splits into groups.
+        let probe = "cd -- '/var/log' 2>/dev/null || { echo @ERR; exit 0; }; \
+             echo @CWD; pwd; echo @LS; \
+             ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'";
+        let a = grade(probe, "");
+        assert_eq!(
+            a.level,
+            RiskLevel::Green,
+            "listDir probe must stay GREEN (rule={}, reason={})",
+            a.rule,
+            a.reason
+        );
+    }
+
+    // ---- destructive operations hidden behind variables ----
+
+    #[test]
+    fn destructive_via_variable_is_red() {
+        // The literal blacklist cannot see that `$d` expands to `/`, so these
+        // must be caught by the destructive-var rules and stay RED.
+        for cmd in [
+            "d=/; rm -rf $d/",
+            "rm -rf ${d}/",
+            "target=/etc; rm -rf $target",
+            "p=/var/lib; shred $p/secret",
+            "dd if=/dev/zero of=$dev",
+        ] {
+            let a = grade(cmd, "read");
+            assert_eq!(a.level, RiskLevel::Red, "expected RED for: {cmd}");
+        }
+    }
+
+    #[test]
+    fn benign_variable_use_stays_green() {
+        // A variable that is NOT used by a destructive verb must not be
+        // escalated — otherwise the rule would flag every shell script.
+        for cmd in [
+            "echo $HOME",
+            "ls $PATH",
+            "cat $CONFIG_FILE",
+            "grep -r $PATTERN /var/log",
+        ] {
+            let a = grade(cmd, "read");
+            assert_eq!(a.level, RiskLevel::Green, "expected GREEN for: {cmd}");
+        }
+    }
+
+    #[test]
+    fn write_via_variable_is_at_least_yellow() {
+        // A write verb with a variable target cannot be proven safe: it must
+        // never be GREEN (auto-executed).
+        for cmd in ["mv $SRC $DST", "chmod 644 $FILE"] {
+            let a = grade(cmd, "read");
+            assert_ne!(a.level, RiskLevel::Green, "expected >=YELLOW for: {cmd}");
+        }
     }
 }

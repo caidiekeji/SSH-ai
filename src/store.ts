@@ -109,9 +109,13 @@ interface Store {
   // ---- agent mode (automated ops loop) ----
   agentStatus: "idle" | "running" | "waiting" | "done" | "failed" | "stopped";
   agentGoal: string;
-  agentSteps: { no: number; command: string; description: string; output: string; risk: string; kind: "exec" | "verify" }[];
-  agentApproval: { command: string; description: string; level: string } | null;
+  agentSteps: AgentStepRecord[];
+  agentApproval: AgentApproval | null;
   agentError: string;
+  /** The plan produced by the Planner layer (null before planning). */
+  agentPlan: import("./types").AgentPlan | null;
+  /** Structured work memory: cwd / facts / hypotheses / failed attempts. */
+  agentMemory: AgentMemory;
   _agentResolve: ((ok: boolean) => void) | null;
   /** Run token: a fresh startAgent invalidates any previous loop. */
   _agentRunId: number;
@@ -136,6 +140,44 @@ export interface DiagnosisResultPayload {
   model: string;
 }
 
+/** One executed step as shown in the Agent card. */
+export interface AgentStepRecord {
+  no: number;
+  command: string;
+  description: string;
+  output: string;
+  risk: string;
+  kind: "exec" | "verify" | "pty";
+  /** Verifier verdict for this step (undefined = not asserted). */
+  verified?: boolean;
+  /** Why the assertions failed. */
+  verifyFailures?: string[];
+}
+
+/** The approval request shown to the user. */
+export interface AgentApproval {
+  command: string;
+  description: string;
+  level: string;
+  /** Full payload for a pty write (never truncated — the preview must match
+   *  what is actually written byte for byte). */
+  fullText?: string;
+  /** Host the command will run on — the approval must say WHERE. */
+  host?: string;
+}
+
+/** Structured work memory fed back to the planner on every step. */
+export interface AgentMemory {
+  /** Live cwd of the agent's own shell. */
+  cwd: string;
+  /** Facts confirmed by a passing assertion. */
+  facts: string[];
+  /** Hypotheses that were ruled out (with the reason). */
+  hypotheses: string[];
+  /** Attempts that failed (command + why). */
+  failedAttempts: string[];
+}
+
 let cardSeq = 0;
 const nextCardId = () => `card-${Date.now()}-${cardSeq++}`;
 let lastQuestion = "";
@@ -145,6 +187,42 @@ let diagRunning = false;
 // longer matches the current one exits instead of resurrecting (stop -> start
 // race previously let the OLD and NEW loops run in parallel).
 let agentRunSeq = 0;
+
+/**
+ * Trim command output for the model: keep head + tail + error-ish lines in
+ * the middle, with an EXPLICIT omission marker (OpenHands-style). Long
+ * outputs otherwise either get silently cut at the tail (losing the error at
+ * the top) or blow the context window.
+ */
+const trimForAi = (raw: string): string => {
+  const MAX_CHARS = 6000;
+  if (raw.length <= MAX_CHARS && raw.split("\n").length <= 60) return raw;
+  const lines = raw.split("\n");
+  const head = lines.slice(0, 12);
+  const tail = lines.slice(-30);
+  const errRe =
+    /(error|fail|fatal|traceback|exception|denied|refused|not found|no such|timeout|panic|错误|失败|拒绝|超时|不存在)/i;
+  const mid = lines.slice(12, -30).filter((l) => errRe.test(l)).slice(0, 15);
+  const omitted = Math.max(0, lines.length - head.length - tail.length - mid.length);
+  const out = [
+    ...head,
+    `…（已省略中间 ${omitted} 行，保留错误相关行与结尾）…`,
+    ...mid,
+    ...tail,
+  ].join("\n");
+  return out.length > MAX_CHARS + 500 ? out.slice(-(MAX_CHARS + 500)) : out;
+};
+
+// Human-readable rendering of a step's machine-checkable expectation, shown
+// in the Agent card so the user can see WHAT will be verified before it runs.
+const describeExpect = (e: import("./types").ExpectSpec): string => {
+  const parts: string[] = [];
+  if (e.exitCode !== null && e.exitCode !== undefined) parts.push(`退出码=${e.exitCode}`);
+  for (const c of e.contains ?? []) parts.push(`输出包含「${c}」`);
+  for (const c of e.notContains ?? []) parts.push(`输出不含「${c}」`);
+  if (e.regex) parts.push(`输出匹配 /${e.regex}/`);
+  return parts.length ? `（断言：${parts.join("；")}）` : "";
+};
 
 // Previous raw byte/sector counters (for computing per-second rates).
 let lastIoRaw: { sessionId: number; rx: number; tx: number; dr: number; dw: number; t: number } | null = null;
@@ -508,6 +586,10 @@ export const useStore = create<Store>((set, get) => ({
   agentSteps: [],
   agentApproval: null,
   agentError: "",
+  /** The plan produced by the Planner layer (null before planning). */
+  agentPlan: null,
+  /** Structured work memory: cwd / facts / hypotheses / failed attempts. */
+  agentMemory: { cwd: "", facts: [], hypotheses: [], failedAttempts: [] },
   _agentResolve: null as ((ok: boolean) => void) | null,
   _agentRunId: 0,
   startAgent: (goal) => {
@@ -526,133 +608,317 @@ export const useStore = create<Store>((set, get) => ({
     void get().agentLoop(runId);
   },
   agentLoop: async (runId: number) => {
-    const MAX_STEPS = 12;
-    let verifyAsked = false; // 是否已要求 AI 补验证（防无限验证循环）
-    // A loop whose run token was superseded (stop -> new start) must exit,
-    // not resume and double-execute steps alongside the new loop.
+    // =========================================================================
+    // Agent automation loop — five layers:
+    //   Planner  → one model call produces the whole ordered plan
+    //   Policy   → authorization scope decides what runs unattended
+    //   Executor → runs the plan on the persistent shell
+    //   Verifier → Rust evaluates each step's assertions
+    //   State    → cwd / facts / hypotheses / failed attempts feed back
+    // =========================================================================
+    const MAX_STEPS = 24;
+
+    const audit = (status: string) => {
+      const st = get();
+      void ipc.saveAgentLog(st.agentGoal, status, st.agentSteps);
+    };
+
+    // --- sessionId is FROZEN for the whole task -------------------------------
+    // The old loop re-read `get().sessionId` every round, so switching tabs
+    // mid-task silently moved the task to ANOTHER HOST. The task now belongs
+    // to the host it was started on.
+    const sessionId = get().sessionId;
+    if (!sessionId) {
+      set({ agentStatus: "failed", agentError: "会话已断开，任务中止" });
+      audit("failed");
+      return;
+    }
+    const host = get().tabs.find((t) => t.sessionId === sessionId)?.host ?? "";
+
     const alive = () =>
-      get()._agentRunId === runId && (get().agentStatus === "running" || get().agentStatus === "waiting");
-    // Per-command exec timeout from settings (5..=300s, default 60).
+      get()._agentRunId === runId &&
+      (get().agentStatus === "running" || get().agentStatus === "waiting");
+
     const cfg = await ipc.getAgentConfig().catch(() => null);
     const execTimeout = Math.min(300, Math.max(5, cfg?.agentExecTimeout ?? 60));
+    const autoGreen = cfg?.autoGreen ?? true;
+    const policy = cfg?.policy ?? "readonly";
     const profileId = get().activeProfileId;
-    // 审计：任务结束时落盘（data_dir/agent_logs/），失败静默。
-    const audit = (s: string) => {
-      const st = get();
-      void ipc.saveAgentLog(st.agentGoal, s, st.agentSteps);
-    };
-    for (let i = 1; i <= MAX_STEPS; i++) {
-      const st = get();
-      if (st.agentStatus !== "running" || !st.sessionId) return;
-      const hasVerify = st.agentSteps.some((s) => s.kind === "verify");
-      const requireVerification = verifyAsked && !hasVerify;
+    const goal = get().agentGoal;
 
-      // 1. Plan the next step (AI returns pure data; transient errors retried).
-      let step: Awaited<ReturnType<typeof ipc.agentStep>>;
-      try {
-        step = await withRetry(() =>
-          ipc.agentStep(
-            st.sessionId!,
-            st.agentGoal,
-            st.agentSteps.map((s) => ({ command: s.command, output: s.output })),
-            requireVerification,
-            profileId,
-          ),
-        );
-      } catch (e) {
-        if (alive()) set({ agentStatus: "failed", agentError: String(e) });
+    // --- State layer: structured work memory ----------------------------------
+    const memory: AgentMemory = { cwd: "", facts: [], hypotheses: [], failedAttempts: [] };
+    const setMemory = (patch: Partial<AgentMemory>) => {
+      Object.assign(memory, patch);
+      set({ agentMemory: { ...memory } });
+    };
+
+    // --- Policy layer ---------------------------------------------------------
+    // "readonly": only read-only commands run unattended.
+    // "plan":    commands belonging to the APPROVED plan run unattended.
+    // "step":    every write command is confirmed individually.
+    let planApproved = policy === "plan";
+    const approvedCommands = new Set<string>();
+
+    // Ask the user for approval. Returns true when the command may run.
+    const requestApproval = async (
+      command: string,
+      description: string,
+      level: string,
+      fullText?: string,
+    ): Promise<boolean> => {
+      set({
+        agentStatus: "waiting",
+        agentApproval: { command, description, level, fullText, host },
+      });
+      const ok = await new Promise<boolean>((resolve) =>
+        set({ _agentResolve: resolve } as Partial<Store>),
+      );
+      if (get().agentStatus === "stopped") return false;
+      set({ agentApproval: null, agentStatus: "running" });
+      return ok;
+    };
+
+    // =====================================================================
+    // PLANNER — one model call produces the whole plan
+    // =====================================================================
+    let plan: import("./types").AgentPlan | null = null;
+    try {
+      plan = await withRetry(() => ipc.agentPlan(sessionId, goal, profileId));
+      set({ agentPlan: plan });
+    } catch (e) {
+      if (alive()) {
+        set({ agentStatus: "failed", agentError: `规划失败：${String(e)}` });
+        audit("failed");
+      }
+      return;
+    }
+    if (!alive()) return;
+    if (!plan || plan.steps.length === 0) {
+      set({ agentStatus: "failed", agentError: "AI 未产出可执行的计划" });
+      audit("failed");
+      return;
+    }
+
+    // Under the "plan" scope the user approves the WHOLE plan once, so the
+    // individual write commands do not interrupt the task step by step.
+    if (policy === "plan" && !planApproved) {
+      const summary = plan.steps
+        .map((s, i) => `${i + 1}. ${s.intent || s.command}`)
+        .join("\n");
+      const ok = await requestApproval(
+        `【执行计划】共 ${plan.steps.length} 步\n${summary}`,
+        "批准后，计划内的命令将不再逐条询问",
+        "yellow",
+      );
+      if (!ok) {
+        set({ agentStatus: "stopped", agentError: "你未批准该计划，任务已停止" });
+        audit("stopped");
         return;
+      }
+      planApproved = true;
+      for (const s of plan.steps) approvedCommands.add(s.command);
+    }
+
+    // =====================================================================
+    // EXECUTOR + VERIFIER — run the plan, verify each step
+    // =====================================================================
+    let stepNo = 0;
+    let verifiedCount = 0;
+    let assertCount = 0;
+    let consecutiveFailures = 0;
+
+    for (const planStep of plan.steps) {
+      if (!alive()) return;
+      if (stepNo >= MAX_STEPS) break;
+
+      const command = planStep.command;
+      stepNo += 1;
+
+      // --- Policy: does this command need an individual confirmation? -------
+      let assessment: RiskAssessment;
+      try {
+        assessment = await ipc.assessRisk(command, planStep.riskHint || "read");
+      } catch {
+        assessment = {
+          level: "yellow",
+          rule: "grader-error",
+          reason: "本地分级器异常，按中风险处理",
+        };
       }
       if (!alive()) return;
 
-      if (step.action === "done") {
-        // P0 加固：done 必须有 verify 证据。第一次强令 AI 补验证；若它再次
-        // 返回 done 仍无验证，判定失败而非放行（旧逻辑放行 = 可绕过）。
-        if (!hasVerify) {
-          if (!verifyAsked) {
-            verifyAsked = true;
-            continue;
-          }
-          set({
-            agentStatus: "failed",
-            agentError: "AI 宣称完成但未提供验证结果，任务中止。请人工核对目标状态。",
-          });
+      const isGreen = assessment.level === "green";
+      const inApprovedPlan = approvedCommands.has(command);
+      if (isGreen && autoGreen) {
+        // read-only, unattended
+      } else if (inApprovedPlan && planApproved) {
+        // inside the approved plan
+      } else {
+        const ok = await requestApproval(
+          command,
+          planStep.intent || "",
+          assessment.level,
+        );
+        if (!ok) {
+          set({ agentStatus: "stopped", agentError: "你拒绝了该命令，任务已停止" });
+          audit("stopped");
+          return;
+        }
+      }
+      if (!alive()) return;
+
+      // --- Executor: run it on the persistent shell --------------------------
+      let output = "";
+      let exitCode: number | null = null;
+      let maybeExecuted = false;
+      try {
+        const resp = await ipc.agentExec(sessionId, command, execTimeout, "approved");
+        output = resp.output;
+        exitCode = resp.exitCode;
+        maybeExecuted = resp.maybeExecuted;
+        if (resp.cwd) setMemory({ cwd: resp.cwd });
+        if (resp.exitCode !== null && resp.exitCode !== 0) {
+          output += `\n（退出码 ${resp.exitCode}：命令未成功，请分析报错后再决定下一步）`;
+        }
+        if (resp.timedOut) {
+          output += "\n（命令超时：执行通道已重置，cd/export 等状态可能已丢失）";
+        } else if (resp.shellGone) {
+          output += "\n（shell 已退出：执行通道已重置，cd/export 等状态可能已丢失）";
+        }
+        if (resp.maybeExecuted) {
+          output +=
+            "\n（重要：通道在返回结果前断开，该命令可能已在远端执行。请先用只读命令核实状态，不要直接重试。）";
+        }
+        if (!output.trim()) output = "（命令执行完成，无输出）";
+      } catch (e) {
+        // Gate refusal or channel error: record it as a failed attempt so
+        // the model can change approach instead of repeating the same thing.
+        consecutiveFailures += 1;
+        const msg = `【执行被拒/失败】${String(e)}`;
+        set((s) => ({
+          agentSteps: [
+            ...s.agentSteps,
+            { no: stepNo, command, description: planStep.intent || "", output: msg, risk: assessment.level, kind: "exec" },
+          ],
+        }));
+        memory.failedAttempts.push(`${command} → ${String(e)}`);
+        setMemory({});
+        if (consecutiveFailures >= 3) {
+          set({ agentStatus: "failed", agentError: `连续 ${consecutiveFailures} 次执行失败，任务中止：${String(e)}` });
           audit("failed");
           return;
         }
-        set({ agentStatus: "done" });
-        audit("done");
-        return;
+        continue;
       }
-      if (step.action === "giveup") {
-        set({ agentStatus: "failed", agentError: step.reason || step.summary || "Agent 无法完成该目标" });
-        audit("failed");
-        return;
-      }
-      const command = step.command || "";
-      if (!command) {
-        set({ agentStatus: "failed", agentError: "Agent 返回了空命令" });
-        return;
-      }
-      const kind: "exec" | "verify" = step.action === "verify" ? "verify" : "exec";
 
-      // 2. Local risk grading (AI hint NOT trusted — PRD §5.5). A grader
-      // failure must NOT hang the loop unhandled — degrade to YELLOW.
-      let assessment: RiskAssessment;
-      try {
-        assessment = await ipc.assessRisk(command, step.riskHint || "read");
-      } catch (e) {
-        assessment = { level: "yellow", rule: "grader-error", reason: "本地分级器异常，按中风险处理" };
-      }
-      if (!alive()) return;
-      const autoGreen = cfg?.autoGreen ?? true;
-      let ok = assessment.level === "green" && autoGreen;
-
-      // 3. Yellow/red (or auto-green off): wait for user approval.
-      if (!ok) {
-        set({
-          agentStatus: "waiting",
-          agentApproval: { command, description: step.description || "", level: assessment.level },
-        });
-        ok = await new Promise<boolean>((resolve) => set({ _agentResolve: resolve } as Partial<Store>));
-        if (get().agentStatus === "stopped") return;
-        set({ agentApproval: null, agentStatus: "running" });
-        if (!ok) {
-          set({ agentStatus: "stopped", agentError: "你拒绝了该命令，任务已停止" });
-          return;
+      // --- Verifier: Rust decides whether the assertions hold ---------------
+      let verified: boolean | undefined;
+      let verifyFailures: string[] = [];
+      const hasExpect =
+        planStep.expect &&
+        (planStep.expect.exitCode !== null &&
+          planStep.expect.exitCode !== undefined ||
+          (planStep.expect.contains?.length ?? 0) > 0 ||
+          (planStep.expect.notContains?.length ?? 0) > 0 ||
+          !!planStep.expect.regex);
+      if (hasExpect) {
+        assertCount += 1;
+        try {
+          const outcome = await ipc.agentVerify(planStep.expect, exitCode, output);
+          verified = outcome.passed;
+          verifyFailures = outcome.failures;
+        } catch (e) {
+          verified = false;
+          verifyFailures = [`断言校验失败：${String(e)}`];
         }
+        if (verified) {
+          verifiedCount += 1;
+          memory.facts.push(`${planStep.intent || command} → 断言通过`);
+        } else {
+          memory.hypotheses.push(
+            `${planStep.intent || command} → 断言未通过（${verifyFailures.join("；") || "输出与预期不符"}）`,
+          );
+        }
+        setMemory({});
       }
 
-      // 4. Execute on the separate oneshot channel (timeout from settings).
-      let output = "";
-      try {
-        output = await ipc.execOneshot(st.sessionId, command, execTimeout);
-      } catch (e) {
-        set((s) => ({
-          agentSteps: [...s.agentSteps, { no: i, command, description: step.description || "", output: String(e), risk: assessment.level, kind }],
-          agentStatus: "failed",
-          agentError: `第 ${i} 步执行失败: ${String(e)}`,
-        }));
-        audit("failed");
-        return;
-      }
-      if (get().agentStatus !== "running") return;
+      const kind: "exec" | "verify" = hasExpect ? "verify" : "exec";
+      const desc = hasExpect
+        ? `${planStep.intent || "验证"}${describeExpect(planStep.expect)}`
+        : planStep.intent || "";
       set((s) => ({
         agentSteps: [
           ...s.agentSteps,
           {
-            no: i,
+            no: stepNo,
             command,
-            description: step.action === "verify" ? `${step.description || "验证"}${step.expect ? `（预期: ${step.expect}）` : ""}` : step.description || "",
-            output: output.slice(-1600),
+            description: desc,
+            output: trimForAi(output),
             risk: assessment.level,
             kind,
+            verified,
+            verifyFailures: verifyFailures.length ? verifyFailures : undefined,
           },
         ],
       }));
+
+      // A step that ran but did not satisfy its assertions is a REAL failure:
+      // count it towards the consecutive-failure breaker.
+      if (verified === false || (verified === undefined && exitCode !== null && exitCode !== 0)) {
+        consecutiveFailures += 1;
+        memory.failedAttempts.push(
+          `${command} → ${verified === false ? verifyFailures.join("；") : `退出码 ${exitCode}`}`,
+        );
+        setMemory({});
+        if (consecutiveFailures >= 3) {
+          set({
+            agentStatus: "failed",
+            agentError: `连续 ${consecutiveFailures} 步未达成预期，任务中止：${
+              memory.failedAttempts[memory.failedAttempts.length - 1]
+            }`,
+          });
+          audit("failed");
+          return;
+        }
+      } else {
+        consecutiveFailures = 0;
+      }
+
+      // The command may have executed remotely before the channel died —
+      // replaying it would run it twice. Stop and let the user decide.
+      if (maybeExecuted) {
+        set({
+          agentStatus: "failed",
+          agentError:
+            "通道在返回结果前断开：最后一条命令可能已在远端执行。为避免重复执行，任务已中止，请人工核实状态。",
+        });
+        audit("failed");
+        return;
+      }
     }
-    set({ agentStatus: "failed", agentError: `已达最大步数（${MAX_STEPS} 步），任务未完成，可检查后重试` });
-    audit("failed");
+
+    // =====================================================================
+    // Completion gate — a claim of success needs ASSERTION EVIDENCE
+    // =====================================================================
+    if (assertCount === 0) {
+      set({
+        agentStatus: "failed",
+        agentError: "计划中没有可校验的验证步骤，无法确认目标是否达成，任务中止。请人工核对。",
+      });
+      audit("failed");
+      return;
+    }
+    if (verifiedCount === 0) {
+      set({
+        agentStatus: "failed",
+        agentError: "所有验证步骤的断言均未通过，无法确认目标已达成，任务中止。请人工核对。",
+      });
+      audit("failed");
+      return;
+    }
+    set({ agentStatus: "done" });
+    audit("done");
   },
   stopAgent: () => {
     const resolve = get()._agentResolve;
@@ -677,19 +943,23 @@ export const useStore = create<Store>((set, get) => ({
     const { sessionId } = get();
     if (!sessionId) return;
     // Single POSIX probe: memory / swap / disk / load / cores / uptime /
-    // network bytes (all non-lo IFs) / root-disk sectors read+written.
+    // network bytes (all non-LO IFs) / root-disk sectors read+written.
+    // NOTE: must stay GREEN under the Rust execution gate (read-only
+    // segments + no `$(...)` substitution). DISKIO reads /proc/mounts +
+    // /proc/diskstats in ONE awk instead of `d=$(df …)` — command
+    // substitution would force YELLOW and the gate would refuse it.
     const probe =
       "echo @MEM; free -b | awk 'NR==2{print $2\" \"$3\" \"$7}'; " +
       "echo @SWAP; free -b | awk 'NR==3{print $2\" \"$3}'; " +
       "echo @DISK; df -B1 / | awk 'NR==2{print $2\" \"$3}'; " +
-      "echo @NET; awk 'NR>2 && $1!=\"lo:\" {rx+=$2; tx+=$10} END{print rx+0\" \"tx+0}' /proc/net/dev; " +
-      "echo @DISKIO; d=$(df / | tail -1 | awk '{print $1}' | sed 's|.*/||'); " +
-      "line=$(awk -v d=\"$d\" '$3==d{print $6\" \"$10; exit}' /proc/diskstats); " +
-      "[ -z \"$line\" ] && line=$(awk -v d=\"${d%%[0-9]*}\" '$3==d{print $6\" \"$10; exit}' /proc/diskstats); " +
-      "echo \"$line\"; " +
+      "echo @NET; awk 'NR<3{next} $1!=\"lo:\" {rx+=$2; tx+=$10} END{print rx+0\" \"tx+0}' /proc/net/dev; " +
+      "echo @DISKIO; awk 'FNR==NR{ if ($2==\"/\") { d=$1; sub(/.*\\//,\"\",d) } next } " +
+      "{ b=d; sub(/[0-9]+$/,\"\",b); if ($3==d && !e) { e=$6\" \"$10 } " +
+      "else if ($3==b && !p) { p=$6\" \"$10 } } " +
+      "END{ if (e) print e; else if (p) print p; else print \"\" }' /proc/mounts /proc/diskstats; " +
       "echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; " +
       "echo @CORES; nproc 2>/dev/null || echo 1; " +
-      "echo @UPTIME; uptime -p 2>/dev/null | sed 's/^up //'";
+      "echo @UPTIME; uptime -p 2>/dev/null | cut -c4-";
     try {
       const out = await ipc.execOneshot(sessionId, probe);
       const sec = (tag: string) => {
@@ -747,9 +1017,11 @@ export const useStore = create<Store>((set, get) => ({
     const qdir =
       path === "~" ? '"$HOME"' : path.startsWith("~/") ? '"$HOME' + rest + '"' : "'" + path.replace(/'/g, "'\\''") + "'";
     // -A all-but-dotfiles, -p dir suffix, long-iso time, size + name only.
+    // Must stay GREEN under the execution gate: no `$(pwd)` substitution
+    // (a separate `pwd` segment instead) and only whitelisted segments.
     const probe =
-      `cd -- ${qdir} 2>/dev/null || { echo @ERR; exit 0; }; echo "@CWD\n$(pwd)"; ` +
-      `echo "@LS"; ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'`;
+      `cd -- ${qdir} 2>/dev/null || { echo @ERR; exit 0; }; echo @CWD; pwd; ` +
+      `echo @LS; ls -A -p --time-style=long-iso -l 2>/dev/null | grep -v '^total'`;
     try {
       const out = await ipc.execOneshot(sessionId, probe);
       if (out.startsWith("@ERR")) {
@@ -785,6 +1057,10 @@ export const useStore = create<Store>((set, get) => ({
   runOp: async (command) => {
     const { sessionId } = get();
     if (!sessionId) throw new Error("未连接主机");
-    return ipc.execOneshot(sessionId, command);
+    // File-browser operations are triggered by an explicit user action in the
+    // UI (create/rename/delete/save/run) — that click is the authorization
+    // for YELLOW writes. The Rust execution gate still re-grades every
+    // command and unconditionally refuses RED.
+    return ipc.execOneshot(sessionId, command, undefined, "approved");
   },
 }));

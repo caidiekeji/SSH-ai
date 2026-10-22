@@ -2,9 +2,10 @@
 //! risk grading, prefill gating, keychain access, known-hosts — all here.
 
 use crate::ai::{
-    parse_response, run_agent_step, run_chat, run_diagnosis, AgentStepIn, ChatTurn,
+    parse_response, run_agent_plan, run_agent_step, run_chat, run_diagnosis, AgentStepIn, ChatTurn,
     DiagnosisRequest,
 };
+use crate::agent_plan::{verify_expectation, ExpectSpec, VerifyOutcome};
 use crate::keyring_store as keyring;
 use crate::provider::specs::PROVIDER_SPECS;
 use crate::provider::{make_adapter, ProviderProfile};
@@ -576,6 +577,10 @@ pub async fn agent_step(
     steps: Vec<AgentStepIn>,
     require_verification: Option<bool>,
     profile_id: Option<String>,
+    // The agent shell's LIVE cwd. The connect-time probe ran in the user's
+    // PTY channel and never saw the agent's own `cd`, so the model would
+    // reason about a stale directory.
+    agent_cwd: Option<String>,
 ) -> Result<crate::ai::AgentStepOut, String> {
     let (profile, key) = {
         let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
@@ -611,6 +616,11 @@ pub async fn agent_step(
         (p.system_info.clone(), tail)
     };
     let sys_text = crate::pipeline::context::format_system_context(&sys_info);
+    // Override the stale probed CWD with the agent shell's live one.
+    let sys_text = match agent_cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(cwd) => format!("{sys_text}CWD(Agent执行通道): {cwd}\n"),
+        None => sys_text,
+    };
     let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
     run_agent_step(
         adapter.as_ref(),
@@ -829,6 +839,8 @@ fn chrono_like_timestamp() -> String {
 pub struct AgentConfig {
     pub auto_green: bool,
     pub agent_exec_timeout: u64,
+    /// Authorization scope: "readonly" | "plan" | "step".
+    pub policy: String,
 }
 
 #[tauri::command]
@@ -837,6 +849,7 @@ pub fn get_agent_config(state: State<'_, AppState>) -> AgentConfig {
     AgentConfig {
         auto_green: s.agent_auto_green,
         agent_exec_timeout: s.agent_exec_timeout,
+        policy: s.agent_policy.clone(),
     }
 }
 
@@ -845,11 +858,20 @@ pub fn set_agent_config(
     state: State<'_, AppState>,
     auto_green: bool,
     agent_exec_timeout: u64,
+    policy: Option<String>,
 ) -> Result<(), String> {
     {
         let mut s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         s.agent_auto_green = auto_green;
         s.agent_exec_timeout = agent_exec_timeout.clamp(5, 300);
+        if let Some(p) = policy {
+            // Only the three known scopes are accepted; anything else falls
+            // back to the safest one.
+            s.agent_policy = match p.as_str() {
+                "plan" | "step" | "readonly" => p,
+                _ => "readonly".into(),
+            };
+        }
     }
     state.save_settings()
 }
@@ -1019,6 +1041,41 @@ pub fn save_uploaded_key(
 /// Run a one-shot command on a fresh exec channel (NOT the PTY). Powers the
 /// server dashboard probe and explicit user-initiated file operations.
 /// This path is USER-triggered only — AI output never reaches it (HC-03).
+/// Execution-layer gate: the SINGLE choke point for every non-PTY exec
+/// (dashboard probes, file ops, agent steps, MCP exec_command). Every
+/// command is re-graded HERE regardless of what the caller checked.
+/// RED is always refused; YELLOW requires `ack == "yellow"` (user approval
+/// forwarded by the caller); GREEN runs with any ack.
+/// The Rust side is the ONLY authority on whether a command may run.
+///
+/// `ack` carries the USER's authorization, not the frontend's guess of the
+/// risk level:
+///   * `"none"`  — the user did not authorize this command
+///   * `"approved"` — the user explicitly approved THIS command
+///
+/// The level is re-derived here from the command text alone, so a frontend
+/// that mis-grades cannot widen the gate: a RED command is refused even
+/// with an approval, a YELLOW command needs an approval, and a GREEN command
+/// always runs. (The previous contract had the frontend pass a level-derived
+/// ack, which made RED un-approvable by construction — clicking "approve"
+/// on a high-risk command always failed, with a misleading message.)
+pub fn execution_gate(state: &AppState, command: &str, ack: &str) -> Result<(), String> {
+    use crate::safety::risk::RiskLevel;
+    let assessment = state.risk.assess(command, "");
+    let approved = ack == "approved";
+    match assessment.level {
+        RiskLevel::Red => Err(format!(
+            "已拒绝执行：命中黑名单规则「{}」——{}。该命令风险过高，Agent 不予执行；如确需执行请在终端中手动输入。",
+            assessment.rule, assessment.reason
+        )),
+        RiskLevel::Yellow if !approved => Err(format!(
+            "已拒绝执行：该命令为写操作（{}）。需要在确认流程中批准后才会执行。",
+            assessment.reason
+        )),
+        _ => Ok(()),
+    }
+}
+
 #[tauri::command]
 pub async fn exec_oneshot(
     state: State<'_, AppState>,
@@ -1027,33 +1084,15 @@ pub async fn exec_oneshot(
     // Optional per-call timeout (5..=300 s). Default 15 s for dashboard
     // probes; the Agent loop passes the configured exec timeout.
     timeout_secs: Option<u64>,
-    // None (or "green") => only GREEN commands may run. "yellow" => the
-    // caller has user authorization for a YELLOW (write) command.
+    // "approved" = the caller has explicit user authorization for a YELLOW
+    // (write) command. None => only GREEN commands may run. The level itself
+    // is re-derived by `execution_gate`; this string is NOT a risk level.
     user_ack: Option<String>,
 ) -> Result<String, String> {
-    use crate::safety::risk::RiskLevel;
     use russh::ChannelMsg;
 
-    // ---- execution-layer gate: the SINGLE choke point for every non-PTY
-    // exec (dashboard probes, file ops, agent steps, MCP exec_command).
-    // Every command is re-graded HERE regardless of what the caller checked.
     let ack = user_ack.as_deref().unwrap_or("none");
-    let assessment = state.risk.assess(&command, "");
-    match assessment.level {
-        RiskLevel::Red => {
-            return Err(format!(
-                "已拒绝执行：命中黑名单规则「{}」——{}。该命令风险过高，如确需执行请在终端中手动输入。",
-                assessment.rule, assessment.reason
-            ))
-        }
-        RiskLevel::Yellow if ack != "yellow" => {
-            return Err(format!(
-                "已拒绝执行：该命令为写操作（{}）。请通过 Agent 确认流程执行，或检查命令是否应包含写操作。",
-                assessment.reason
-            ))
-        }
-        _ => {}
-    }
+    execution_gate(&state, &command, ack)?;
 
     let timeout = timeout_secs.unwrap_or(15).clamp(5, 300);
     // Clone the Arc'd cell out of the map, then drop the std guard BEFORE
@@ -1079,6 +1118,12 @@ pub async fn exec_oneshot(
             .map_err(|e| format!("执行失败: {e}"))?;
         ch
     };
+
+    // Close our side of stdin immediately: this path never writes stdin
+    // data, so interactive prompts ([Y/n], password, "press enter") must
+    // receive EOF and fail fast instead of hanging until the wall-clock
+    // timeout.
+    let _ = ch.eof().await;
 
     // Wall-clock timeout (a streaming `tail -f` must NOT reset the timer on
     // every frame) and a hard output cap (unbounded growth protection).
@@ -1120,4 +1165,320 @@ pub async fn exec_oneshot(
         text.push_str("\n…（输出已截断：超过 512KB 或超时）");
     }
     Ok(text)
+}
+
+/// Agent execution on the PERSISTENT shell channel: one remote shell reused
+/// across agent steps so `cd` / `export` survive between commands. Goes
+/// through the same execution-layer gate as `exec_oneshot`.
+///
+/// Two safety properties this command guarantees:
+///
+/// 1. **No command replay.** If the shell dies AFTER the command bytes were
+///    handed over, the command MAY have executed remotely (the SSH stream
+///    simply died before the exit code came back). Re-running it would
+///    execute a non-idempotent command twice — the previous implementation
+///    did exactly that. Now the result is reported with
+///    `maybe_executed = true` and the caller must not retry it blindly.
+///    A shell that was already dead BEFORE the write is a different case:
+///    nothing ran, so re-opening and running once is safe.
+/// 2. **Live cwd.** The reply carries the shell's actual working directory
+///    after the command, so the planner sees where it really is instead of
+///    the stale connect-time probe.
+#[tauri::command]
+pub async fn agent_exec(
+    state: State<'_, AppState>,
+    session_id: u64,
+    command: String,
+    // Agent loop passes the configured exec timeout; default 60 s.
+    timeout_secs: Option<u64>,
+    // "approved" = the user approved THIS command in the confirmation flow.
+    user_ack: Option<String>,
+) -> Result<crate::agent_shell::ShellResp, String> {
+    let ack = user_ack.as_deref().unwrap_or("none");
+    execution_gate(&state, &command, ack)?;
+    let timeout = timeout_secs.unwrap_or(60).clamp(5, 300);
+
+    // Clone the Arc'd cells out of the map, then drop the std guard BEFORE
+    // any await so the future stays Send.
+    let (handle_cell, shell_slot) = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let s = sessions.get(&session_id).ok_or("会话不存在")?;
+        (s.handle.clone(), s.agent_shell.clone())
+    };
+
+    // The shell may be re-opened at most once — and ONLY when we can prove
+    // the command never reached the remote side. A shell that died after the
+    // bytes were written is reported as `maybe_executed` instead of being
+    // replayed (that would run a non-idempotent command twice).
+    let mut final_resp: Option<crate::agent_shell::ShellResp> = None;
+    let mut may_reopen = true;
+    loop {
+        // Fetch (or lazily create) the persistent shell driver.
+        let handle = {
+            let mut slot = shell_slot.lock().await;
+            if slot.is_none() {
+                let mut guard = handle_cell.lock().await;
+                let handle = guard.as_mut().ok_or("会话已断开")?;
+                let ch = handle
+                    .channel_open_session()
+                    .await
+                    .map_err(|e| format!("打开 Agent 执行通道失败: {e}"))?;
+                ch.request_shell(true)
+                    .await
+                    .map_err(|e| format!("请求 Agent shell 失败: {e}"))?;
+                *slot = Some(crate::agent_shell::spawn_shell(ch));
+            }
+            slot.as_ref()
+                .cloned()
+                .ok_or_else(|| "Agent 执行通道不可用".to_string())?
+        };
+
+        let (rtx, rrx) = tokio::sync::oneshot::channel();
+        if handle
+            .tx
+            .send(crate::agent_shell::ShellReq::Exec {
+                command: command.clone(),
+                timeout_secs: timeout,
+                resp: rtx,
+            })
+            .await
+            .is_err()
+        {
+            // The driver task is gone: nothing was executed.
+            *shell_slot.lock().await = None;
+            if !may_reopen {
+                break;
+            }
+            may_reopen = false;
+            continue;
+        }
+        match rrx.await {
+            Ok(resp) if resp.shell_gone && !resp.written && may_reopen => {
+                // The shell was already dead before the write → nothing ran,
+                // so re-opening once is safe.
+                *shell_slot.lock().await = None;
+                may_reopen = false;
+                continue;
+            }
+            Ok(resp) => {
+                final_resp = Some(resp);
+                break;
+            }
+            Err(_) => {
+                *shell_slot.lock().await = None;
+                break;
+            }
+        }
+    }
+    final_resp.ok_or_else(|| "Agent 执行通道已失效，请重试".to_string())
+}
+
+/// Cancel the in-flight command on the agent's persistent shell.
+///
+/// The remote command is torn down by closing the channel; the shell itself
+/// is poisoned so the next step starts from a fresh, known state.
+#[tauri::command]
+pub async fn agent_cancel(state: State<'_, AppState>, session_id: u64) -> Result<(), String> {
+    let shell_slot = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .map(|s| s.agent_shell.clone())
+            .ok_or("会话不存在")?
+    };
+    let handle = {
+        let mut slot = shell_slot.lock().await;
+        slot.take()
+    };
+    if let Some(h) = handle {
+        let _ = h.cancel.send(true);
+    }
+    Ok(())
+}
+
+/// Evaluate a step's expectation programmatically (Verifier layer).
+///
+/// The expectation is decided HERE, in Rust, from the real exit code and
+/// output — never by the model. A step whose assertions did not run (empty
+/// spec) can never pass, so it can never serve as completion evidence.
+#[tauri::command]
+pub fn agent_verify(
+    expect: ExpectSpec,
+    exit_code: Option<i32>,
+    output: String,
+) -> Result<VerifyOutcome, String> {
+    Ok(verify_expectation(&expect, exit_code, &output))
+}
+
+/// Produce the whole execution plan in ONE model call (Planner layer).
+///
+/// The returned plan carries per-step machine-checkable expectations, so the
+/// user can review the entire task up-front and each step can be verified
+/// programmatically afterwards.
+#[tauri::command]
+pub async fn agent_plan(
+    state: State<'_, AppState>,
+    session_id: u64,
+    goal: String,
+    profile_id: Option<String>,
+) -> Result<crate::agent_plan::AgentPlan, String> {
+    let (profile, key) = {
+        let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
+        let profile = match profile_id.as_deref() {
+            Some(id) if !id.is_empty() => profiles.iter().find(|p| p.id == id).cloned(),
+            _ => None,
+        }
+        .or_else(|| profiles.last().cloned())
+        .ok_or("未配置 AI Provider：请先在设置中完成配置（S0）")?;
+        let key = resolve_key(&state, &profile.id, None)?;
+        (profile, key)
+    };
+    let pipeline_arc = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .map(|s| s.pipeline.clone())
+            .ok_or("会话不存在")?
+    };
+    let (sys_info, tail) = {
+        let p = pipeline_arc.lock().await;
+        let n = 20.min(p.screen.lines.len());
+        let tail = p
+            .screen
+            .lines
+            .iter()
+            .skip(p.screen.lines.len() - n)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        (p.system_info.clone(), tail)
+    };
+    let sys_text = crate::pipeline::context::format_system_context(&sys_info);
+    let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
+    run_agent_plan(
+        adapter.as_ref(),
+        &goal,
+        &sys_text,
+        &tail,
+        state.agent_prompt().as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Write keystrokes into the USER-VISIBLE terminal on behalf of the agent.
+///
+/// This path used to be a complete bypass of the safety system: the agent's
+/// `pty` action wrote arbitrary text straight into the interactive shell,
+/// never graded, never gated, and the approval dialog showed only the first
+/// 300 characters while the FULL string was executed.
+///
+/// Now:
+/// * the keys are graded by the Rust risk engine (the frontend's opinion is
+///   irrelevant — the gate re-derives the level itself);
+/// * a RED-ish payload is refused outright;
+/// * everything else requires an explicit user approval, and the approval
+///   dialog shows the FULL text (the frontend truncates only for display,
+///   never for execution);
+/// * control characters (other than newline/tab) and ANSI escapes are
+///   stripped, so a payload cannot hide its real content behind invisible
+///   sequences.
+#[tauri::command]
+pub async fn agent_pty_write(
+    state: State<'_, AppState>,
+    session_id: u64,
+    keys: String,
+    // "approved" = the user approved THIS exact payload in the dialog.
+    user_ack: Option<String>,
+) -> Result<String, String> {
+    let ack = user_ack.as_deref().unwrap_or("none");
+    // Strip ANSI escapes and control characters that could disguise content.
+    let cleaned = sanitize_pty_keys(&keys);
+    if cleaned.trim().is_empty() {
+        return Err("终端按键内容为空".into());
+    }
+    // Grade the payload as a command-ish string: interactive programs still
+    // receive shell commands as keystrokes.
+    let assessment = state.risk.assess(&cleaned, "");
+    match assessment.level {
+        RiskLevel::Red => {
+            return Err(format!(
+                "已拒绝执行：终端输入命中黑名单规则「{}」——{}。",
+                assessment.rule, assessment.reason
+            ));
+        }
+        RiskLevel::Yellow if ack != "approved" => {
+            return Err(format!(
+                "已拒绝执行：终端输入被判为中风险（{}），需要你确认后才会写入。",
+                assessment.reason
+            ));
+        }
+        _ => {}
+    }
+
+    let write_tx = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .ok_or("会话不存在")?
+            .write_tx
+            .clone()
+    };
+    write_tx
+        .send(PtyCmd::Data(cleaned.clone().into_bytes()))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(cleaned)
+}
+
+/// Remove ANSI escape sequences and control characters (keeping newline and
+/// tab) from a pty payload.
+fn sanitize_pty_keys(keys: &str) -> String {
+    let mut out = String::with_capacity(keys.len());
+    let mut chars = keys.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // ESC: skip the escape sequence (CSI ... final byte).
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c2 in chars.by_ref() {
+                    if c2.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if c == '\n' || c == '\t' || !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Read the terminal's latest visible lines (local screen model — NO remote
+/// execution). Used by the agent to observe the PTY the user is watching.
+#[tauri::command]
+pub async fn read_screen_tail(    state: State<'_, AppState>,
+    session_id: u64,
+    lines: Option<usize>,
+) -> Result<String, String> {
+    let pipeline_arc = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .map(|s| s.pipeline.clone())
+            .ok_or("会话不存在")?
+    };
+    let p = pipeline_arc.lock().await;
+    let total = p.screen.lines.len();
+    let n = lines.unwrap_or(30).clamp(1, 200).min(total);
+    Ok(p
+        .screen
+        .lines
+        .iter()
+        .skip(total - n)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n"))
 }

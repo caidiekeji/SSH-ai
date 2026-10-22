@@ -416,13 +416,17 @@ function StepRow({
   );
 }
 
-// Agent task card: goal, executed steps, approval gate, stop control.
+// Agent task card: goal, plan review, executed steps, approval gate, work
+// memory, stop control.
 function AgentCard() {
   const status = useStore((s) => s.agentStatus);
   const goal = useStore((s) => s.agentGoal);
   const steps = useStore((s) => s.agentSteps);
   const approval = useStore((s) => s.agentApproval);
   const error = useStore((s) => s.agentError);
+  const plan = useStore((s) => s.agentPlan);
+  const memory = useStore((s) => s.agentMemory);
+  const [planOpen, setPlanOpen] = useState(false);
   if (status === "idle") return null;
 
   const statusText =
@@ -435,6 +439,17 @@ function AgentCard() {
           : status === "failed"
             ? "失败"
             : "已停止";
+
+  const closeCard = () =>
+    useStore.setState({
+      agentStatus: "idle",
+      agentSteps: [],
+      agentGoal: "",
+      agentError: "",
+      agentApproval: null,
+      agentPlan: null,
+      agentMemory: { cwd: "", facts: [], hypotheses: [], failedAttempts: [] },
+    });
 
   return (
     <div className="chat-msg">
@@ -458,38 +473,107 @@ function AgentCard() {
               >
                 <Icon name="sparkles" size={11} /> 诊断复查
               </button>
-              <button
-                className="mini close"
-                onClick={() => useStore.setState({ agentStatus: "idle", agentSteps: [], agentGoal: "", agentError: "", agentApproval: null })}
-              >
+              <button className="mini close" onClick={closeCard}>
                 关闭
               </button>
             </>
           )}
         </div>
         <div className="agent-goal">{goal}</div>
+
+        {/* Planner output: the whole plan is visible up-front, with the
+            machine-checkable expectation of every step. */}
+        {plan && plan.steps.length > 0 && (
+          <div className="agent-plan">
+            <button className="agent-plan-toggle" onClick={() => setPlanOpen((v) => !v)}>
+              <Icon name={planOpen ? "chevronDown" : "chevronRight"} size={12} />
+              执行计划（{plan.steps.length} 步）
+              {planOpen ? "，点击收起" : "，点击展开"}
+            </button>
+            {planOpen && (
+              <ol className="agent-plan-list">
+                {plan.steps.map((s, i) => (
+                  <li key={s.id ?? i} className={steps.some((d) => d.no === i + 1) ? "done" : ""}>
+                    <span className="agent-plan-intent">{s.intent || "（未说明意图）"}</span>
+                    <code className="agent-plan-cmd">{s.command}</code>
+                    {s.expect && (
+                      <span className="agent-plan-expect">
+                        断言：
+                        {[
+                          s.expect.exitCode != null ? `退出码=${s.expect.exitCode}` : "",
+                          ...(s.expect.contains ?? []).map((c) => `包含「${c}」`),
+                          ...(s.expect.notContains ?? []).map((c) => `不含「${c}」`),
+                          s.expect.regex ? `匹配 /${s.expect.regex}/` : "",
+                        ]
+                          .filter(Boolean)
+                          .join("；")}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        )}
+
         <div className="agent-steps">
           {steps.map((s) => (
             <div key={s.no} className="agent-step">
               <div className="agent-step-top">
-                <span className={`risk-dot risk-${s.risk === "destructive" ? "red" : s.risk === "write" ? "yellow" : "green"}`} />
+                <span className={`risk-dot risk-${s.risk === "red" || s.risk === "destructive" ? "red" : s.risk === "yellow" || s.risk === "write" ? "yellow" : "green"}`} />
                 <span className="agent-step-no">{s.no}.</span>
                 <code className="agent-step-cmd">{s.command}</code>
-                {s.kind === "verify" && <span className="verify-badge">验证</span>}
+                {s.kind === "verify" && s.verified === true && (
+                  <span className="verify-badge pass" title="断言通过">验证通过</span>
+                )}
+                {s.kind === "verify" && s.verified === false && (
+                  <span className="verify-badge fail" title={(s.verifyFailures ?? []).join("；")}>验证失败</span>
+                )}
+                {s.kind === "verify" && s.verified === undefined && <span className="verify-badge">验证</span>}
+                {s.kind === "pty" && <span className="verify-badge">终端</span>}
               </div>
               {s.description && <div className="agent-step-desc">{s.description}</div>}
               {s.output && <pre className="agent-step-out">{s.output.split("\n").slice(-4).join("\n")}</pre>}
+              {s.verifyFailures && s.verifyFailures.length > 0 && (
+                <div className="agent-step-fail">断言未通过：{s.verifyFailures.join("；")}</div>
+              )}
             </div>
           ))}
         </div>
-        {status === "running" && <div className="agent-note"><Icon name="sparkles" size={12} className="ai-ico spin" /> AI 正在规划下一步…</div>}
+
+        {/* Work memory: cwd + confirmed facts, so the user can see WHY the
+            agent believes what it believes. */}
+        {(memory.cwd || memory.facts.length > 0) && (
+          <div className="agent-memory">
+            {memory.cwd && (
+              <span className="agent-mem-cwd" title="Agent 持久 shell 的实时工作目录">
+                cwd: {memory.cwd}
+              </span>
+            )}
+            {memory.facts.length > 0 && (
+              <span className="agent-mem-facts" title="由通过断言的步骤确认的事实">
+                已确认 {memory.facts.length} 项事实
+              </span>
+            )}
+          </div>
+        )}
+
+        {status === "running" && !plan && (
+          <div className="agent-note">
+            <Icon name="sparkles" size={12} className="ai-ico spin" /> AI 正在制定执行计划…
+          </div>
+        )}
+        {status === "running" && plan && <div className="agent-note">按计划执行中…</div>}
         {approval && status === "waiting" && (
           <div className="agent-approval">
             <div className="agent-appr-title">
               <Icon name="alertTriangle" size={13} className="ico-yellow" />
               {approval.level === "red" ? "高危命令，需要你确认" : "写操作命令，需要你确认"}
+              {approval.host && <span className="agent-appr-host">目标主机：{approval.host}</span>}
             </div>
-            <code className="agent-appr-cmd">{approval.command}</code>
+            {/* The FULL payload is shown — the preview must match what will
+                actually be written byte for byte (never truncate here). */}
+            <code className="agent-appr-cmd">{approval.fullText ?? approval.command}</code>
             {approval.description && <div className="agent-step-desc">{approval.description}</div>}
             <div className="agent-appr-actions">
               <button className="primary small" onClick={() => useStore.getState().resolveAgent(true)}>批准执行</button>
@@ -497,7 +581,11 @@ function AgentCard() {
             </div>
           </div>
         )}
-        {status === "done" && steps.length >= 0 && <div className="agent-note ok">任务完成</div>}
+        {status === "done" && steps.length >= 0 && (
+          <div className="agent-note ok">
+            任务完成（{steps.filter((s) => s.verified === true).length} 项断言通过验证）
+          </div>
+        )}
         {error && status !== "running" && status !== "waiting" && <div className="agent-note err">{error}</div>}
       </div>
     </div>

@@ -67,6 +67,14 @@ pub struct AppSettings {
     /// Agent mode: per-command exec timeout in seconds (5..=300).
     #[serde(default = "default_agent_exec_timeout")]
     pub agent_exec_timeout: u64,
+    /// Agent mode: authorization scope for planned write operations.
+    ///
+    /// * `"readonly"` — only read-only commands run unattended (default);
+    /// * `"plan"`   — commands that are part of the APPROVED plan run
+    ///   unattended, anything outside it is confirmed individually;
+    /// * `"step"`   — every write command is confirmed individually.
+    #[serde(default = "default_agent_policy")]
+    pub agent_policy: String,
     /// MCP server (for external IDEs): enable flag, bind port, bearer token.
     #[serde(default)]
     pub mcp_enabled: bool,
@@ -86,6 +94,10 @@ fn default_true() -> bool {
 
 fn default_agent_exec_timeout() -> u64 {
     60
+}
+
+fn default_agent_policy() -> String {
+    "readonly".into()
 }
 
 fn default_mcp_port() -> u16 {

@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../store";
 import { ipc } from "../ipc";
-import type { ConnectionConfig, ProviderProfile, ProviderSpec, ThemeName } from "../types";
+import type { AgentPolicy, ConnectionConfig, ProviderProfile, ProviderSpec, ThemeName } from "../types";
 import { Icon } from "./Icon";
 import {
   HostFormFields,
@@ -431,9 +431,10 @@ function AiAdvanced() {
     }
   };
 
-  // ---- agent auto-green + exec timeout ----
+  // ---- agent auto-green + exec timeout + authorization policy ----
   const [agentAutoGreen, setAgentAutoGreen] = useState(true);
   const [agentTimeout, setAgentTimeout] = useState(60);
+  const [agentPolicy, setAgentPolicy] = useState<AgentPolicy>("readonly");
   const [agentSaved, setAgentSaved] = useState(false);
   useEffect(() => {
     ipc
@@ -441,15 +442,17 @@ function AiAdvanced() {
       .then((c) => {
         setAgentAutoGreen(c.autoGreen);
         setAgentTimeout(c.agentExecTimeout);
+        setAgentPolicy(c.policy ?? "readonly");
       })
       .catch(() => {});
   }, []);
 
-  const saveAgentConfig = (autoGreen: boolean, timeout: number) => {
+  const saveAgentConfig = (autoGreen: boolean, timeout: number, policy?: AgentPolicy) => {
     const t = Math.min(300, Math.max(5, Math.round(timeout) || 60));
     setAgentTimeout(t);
+    if (policy) setAgentPolicy(policy);
     ipc
-      .setAgentConfig(autoGreen, t)
+      .setAgentConfig(autoGreen, t, policy)
       .then(() => {
         setAgentSaved(true);
         setTimeout(() => setAgentSaved(false), 2000);
@@ -510,7 +513,7 @@ function AiAdvanced() {
             <button
               className="depth-btn"
               disabled={agentTimeout <= 5}
-              onClick={() => saveAgentConfig(agentAutoGreen, agentTimeout - 5)}
+              onClick={() => saveAgentConfig(agentAutoGreen, agentTimeout - 5, agentPolicy)}
               title="减少 5 秒"
             >
               −
@@ -519,7 +522,7 @@ function AiAdvanced() {
             <button
               className="depth-btn"
               disabled={agentTimeout >= 300}
-              onClick={() => saveAgentConfig(agentAutoGreen, agentTimeout + 5)}
+              onClick={() => saveAgentConfig(agentAutoGreen, agentTimeout + 5, agentPolicy)}
               title="增加 5 秒"
             >
               +
@@ -527,8 +530,30 @@ function AiAdvanced() {
           </div>
           <span className={`depth-saved ${agentSaved ? "show" : ""}`}>已保存</span>
         </div>
+        <div className="depth-row">
+          <span className="depth-label">写操作授权范围</span>
+          <select
+            className="policy-select"
+            value={agentPolicy}
+            onChange={(e) => saveAgentConfig(agentAutoGreen, agentTimeout, e.target.value as AgentPolicy)}
+            title="决定哪些写命令可以不逐条询问"
+          >
+            <option value="readonly">仅只读（最稳妥）</option>
+            <option value="plan">批准计划后自动执行</option>
+            <option value="step">每条写命令单独确认</option>
+          </select>
+          <span className={`depth-saved ${agentSaved ? "show" : ""}`}>已保存</span>
+        </div>
         <div className="dim-note" style={{ marginTop: 7 }}>
-          Agent 模式下 AI 逐步规划命令并自动观察输出；所有命令先经本地风险分级，高危操作永远弹出确认。关闭后每条命令都要手动批准。单条命令超时范围 5~300 秒（默认 60 秒）。
+          Agent 采用五层工作流：<strong>规划</strong>（一次生成带断言的完整计划）→
+          <strong>授权</strong>（按上方范围放行）→ <strong>执行</strong>（持久 shell，cd/export 跨步保留）→
+          <strong>校验</strong>（由本地引擎核对退出码与输出，AI 不能自判完成）→
+          <strong>记忆</strong>（实时目录、已确认事实、失败记录回灌后续规划）。
+          所有命令先经本地风险分级，黑名单高危操作永远拒绝执行。
+          <br />
+          授权范围说明：<strong>仅只读</strong>——只有绿色命令自动执行，写操作逐条确认；
+          <strong>批准计划</strong>——预览整个计划并批准一次后，计划内命令不再逐条询问；
+          <strong>单独确认</strong>——每条写命令执行前都弹出确认。单条命令超时范围 5~300 秒（默认 60 秒）。
         </div>
       </section>
 

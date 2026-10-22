@@ -3,11 +3,16 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentPlan,
+  AgentPolicy,
+  AgentStepHistory,
   ConnectionConfig,
   DiagnosisResult,
+  ExpectSpec,
   ProviderProfile,
   ProviderSpec,
   RiskAssessment,
+  VerifyOutcome,
 } from "./types";
 
 export const ipc = {
@@ -88,26 +93,45 @@ export const ipc = {
     invoke<string>("ai_chat", { history, question, profileId: profileId ?? null }),
 
   // ---- Agent mode (automated ops loop) ----
+  /** One step of the reactive loop (fallback / replanning path). */
   agentStep: (
     sessionId: number,
     goal: string,
-    steps: { command: string; output: string }[],
+    steps: AgentStepHistory[],
     requireVerification?: boolean,
     profileId?: string | null,
   ) =>
     invoke<{
-      action: "command" | "verify" | "done" | "giveup";
+      action: "command" | "verify" | "done" | "giveup" | "pty";
       command?: string;
       description?: string;
       reasoning?: string;
       summary?: string;
       reason?: string;
       expect?: string;
+      keys?: string;
       riskHint?: string;
     }>("agent_step", { sessionId, goal, steps, requireVerification, profileId: profileId ?? null }),
-  getAgentConfig: () => invoke<{ autoGreen: boolean; agentExecTimeout: number }>("get_agent_config"),
-  setAgentConfig: (autoGreen: boolean, agentExecTimeout: number) =>
-    invoke<void>("set_agent_config", { autoGreen, agentExecTimeout }),
+
+  /** Planner: ONE model call produces the whole ordered plan. */
+  agentPlan: (sessionId: number, goal: string, profileId?: string | null) =>
+    invoke<AgentPlan>("agent_plan", { sessionId, goal, profileId: profileId ?? null }),
+
+  /** Verifier: Rust decides whether a step's assertions passed. */
+  agentVerify: (expect: ExpectSpec, exitCode: number | null, output: string) =>
+    invoke<VerifyOutcome>("agent_verify", { expect, exitCode, output }),
+
+  /** Cancel the in-flight command on the agent's persistent shell. */
+  agentCancel: (sessionId: number) => invoke<void>("agent_cancel", { sessionId }),
+
+  /** Gated PTY write: the Rust side grades the payload and requires approval. */
+  agentPtyWrite: (sessionId: number, keys: string, userAck?: "approved") =>
+    invoke<string>("agent_pty_write", { sessionId, keys, userAck: userAck ?? null }),
+
+  getAgentConfig: () =>
+    invoke<{ autoGreen: boolean; agentExecTimeout: number; policy: AgentPolicy }>("get_agent_config"),
+  setAgentConfig: (autoGreen: boolean, agentExecTimeout: number, policy?: AgentPolicy) =>
+    invoke<void>("set_agent_config", { autoGreen, agentExecTimeout, policy: policy ?? null }),
   saveAgentLog: (goal: string, status: string, steps: unknown) =>
     invoke<string>("save_agent_log", { goal, status, steps }).catch(() => ""),
 
@@ -134,15 +158,43 @@ export const ipc = {
   setDiagnosisDepth: (depth: number) => invoke<void>("set_diagnosis_depth", { depth }),
 
   // ---- Server dashboard (user-initiated exec on a separate channel) ----
-  // userAck: "yellow" marks a user-authorized write command (the Rust
+  // userAck: "approved" marks a user-authorized write command (the Rust
   // execution layer re-grades EVERY command as the final authority; RED is
   // always refused). Omitting it allows only GREEN (read-only) commands.
   execOneshot: (
     sessionId: number,
     command: string,
     timeoutSecs?: number,
-    userAck?: "green" | "yellow",
+    userAck?: "approved",
   ) => invoke<string>("exec_oneshot", { sessionId, command, timeoutSecs, userAck: userAck ?? null }),
+
+  // ---- Agent execution: PERSISTENT shell (cd/export survive across steps) ----
+  // Same execution-layer gate as execOneshot. Returns structured result:
+  // exitCode!=0 is DATA (AI self-corrects), not a thrown error; a thrown
+  // error means the gate refused or the channel is broken.
+  // `userAck` carries the USER's authorization ("approved"), never a
+  // frontend-derived risk level — the Rust gate re-grades by itself.
+  agentExec: (
+    sessionId: number,
+    command: string,
+    timeoutSecs?: number,
+    userAck?: "approved",
+  ) =>
+    invoke<{
+      output: string;
+      exitCode: number | null;
+      timedOut: boolean;
+      shellGone: boolean;
+      written: boolean;
+      /** The command MAY have run remotely — do NOT replay it blindly. */
+      maybeExecuted: boolean;
+      /** The shell's live cwd after the command. */
+      cwd: string | null;
+    }>("agent_exec", { sessionId, command, timeoutSecs, userAck: userAck ?? null }),
+
+  // Read terminal screen tail from the LOCAL screen model (no remote exec).
+  readScreenTail: (sessionId: number, lines?: number) =>
+    invoke<string>("read_screen_tail", { sessionId, lines }),
 
   // ---- SFTP (user-initiated file transfer) ----
   sftpDownload: (sessionId: number, remotePath: string) =>

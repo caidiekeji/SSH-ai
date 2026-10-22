@@ -1560,116 +1560,242 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 
 /* ---- agent task card (AI panel) ---- */
 .agent-card {
-  background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 11px 12px;
+  border-left: 3px solid var(--faint);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: hidden;
 }
-.agent-card.st-running { border-color: var(--accent); }
-.agent-card.st-done { border-color: var(--border); }
-.agent-card.st-failed { border-color: var(--red); }
-.agent-head { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+.agent-card.st-running { border-left-color: var(--accent); }
+.agent-card.st-waiting { border-left-color: var(--yellow); }
+.agent-card.st-done { border-left-color: var(--green); }
+.agent-card.st-failed { border-left-color: var(--red); }
+.agent-card.st-stopped { border-left-color: var(--faint); }
+
+.agent-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--panel-2);
+}
 .agent-title { font-size: 12.5px; font-weight: 700; }
 .agent-status {
-  font-size: 10.5px;
-  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
   border-radius: 999px;
-  border: 1px solid var(--border-soft);
+  padding: 1px 8px;
   color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
 }
-.agent-status.st-running { color: var(--accent); border-color: var(--accent); }
-.agent-status.st-done { color: var(--green); border-color: var(--green); }
-.agent-status.st-failed { color: var(--red); border-color: var(--red); }
+.agent-status.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.agent-status.st-waiting { color: var(--yellow); border-color: var(--yellow); background: rgba(210, 153, 34, 0.12); }
+.agent-status.st-done { color: var(--green); border-color: var(--green); background: rgba(63, 185, 80, 0.12); }
+.agent-status.st-failed { color: var(--red); border-color: var(--red); background: rgba(248, 81, 73, 0.12); }
+
 .agent-goal {
-  font-size: 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding: 9px 12px;
   color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  padding: 7px 10px;
-  margin-bottom: 9px;
-  line-height: 1.5;
+  word-break: break-word;
+  border-bottom: 1px solid var(--border-soft);
 }
-.agent-steps { display: flex; flex-direction: column; gap: 7px; max-height: 300px; overflow-y: auto; }
-.agent-step {
-  border: 1px solid var(--border-soft);
-  border-radius: 9px;
-  padding: 7px 9px;
-  background: var(--panel);
-}
-.agent-step-top { display: flex; align-items: center; gap: 6px; }
-.agent-step-no { font-size: 11px; color: var(--text-dim); font-weight: 700; }
-.agent-step-cmd {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--text);
-  background: var(--panel-2);
-  border-radius: 5px;
-  padding: 2px 7px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-  flex: 1;
-}
-.agent-step-desc { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
-.agent-step-out {
-  margin: 5px 0 0;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--text-dim);
-  background: var(--bg);
-  border-radius: 6px;
-  padding: 6px 8px;
-  max-height: 84px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-.agent-note {
+
+/* ---- Planner output: the whole plan, reviewable up-front ---- */
+.agent-plan { border-bottom: 1px solid var(--border-soft); }
+.agent-plan-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 9px;
+  width: 100%;
+  text-align: left;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.agent-plan-toggle:hover { color: var(--text); background: var(--panel-2); }
+.agent-plan-list {
+  margin: 0;
+  padding: 2px 12px 10px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  list-style: decimal;
+}
+.agent-plan-list li { display: flex; flex-direction: column; gap: 3px; }
+.agent-plan-list li.done .agent-plan-intent { color: var(--text-dim); }
+.agent-plan-intent { font-size: 12px; font-weight: 600; line-height: 1.5; word-break: break-word; }
+.agent-plan-cmd {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cmd-text);
+  background: var(--cmd-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 4px 8px;
+  word-break: break-all;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.agent-plan-expect { font-size: 10.5px; color: var(--ai); line-height: 1.5; word-break: break-word; }
+
+/* ---- Executor: executed steps ---- */
+.agent-steps { display: flex; flex-direction: column; }
+.agent-step {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.agent-step-top { display: flex; align-items: flex-start; gap: 7px; }
+.agent-step-top .risk-dot { margin-top: 4px; }
+.agent-step-no { font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.agent-step-cmd {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--cmd-text);
+  word-break: break-all;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.agent-step-desc { font-size: 11.5px; color: var(--text-dim); line-height: 1.55; word-break: break-word; }
+.agent-step-out {
+  margin: 2px 0 0;
+  background: var(--cmd-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 130px;
+  overflow-y: auto;
+  user-select: text;
+}
+.agent-step-fail {
+  font-size: 11px;
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.25);
+  border-radius: 6px;
+  padding: 4px 8px;
+  word-break: break-word;
+}
+
+/* ---- Verifier badge ---- */
+.verify-badge {
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 7px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+}
+.verify-badge.pass { color: var(--green); border-color: var(--green); background: rgba(63, 185, 80, 0.12); }
+.verify-badge.fail { color: var(--red); border-color: var(--red); background: rgba(248, 81, 73, 0.12); }
+
+/* ---- State layer: work memory strip ---- */
+.agent-memory {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.agent-mem-cwd, .agent-mem-facts {
+  font-family: var(--mono);
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 1px 9px;
+  word-break: break-all;
+}
+
+/* ---- status notes ---- */
+.agent-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 11.5px;
   color: var(--text-dim);
+  padding: 9px 12px;
 }
 .agent-note.ok { color: var(--green); }
 .agent-note.err { color: var(--red); }
+
+/* ---- Policy: approval gate (FULL payload, never truncated) ---- */
 .agent-approval {
-  margin-top: 9px;
-  border: 1px solid var(--yellow);
-  border-radius: 9px;
-  padding: 9px 11px;
-  background: var(--panel);
+  margin: 10px 12px 12px;
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  background: rgba(210, 153, 34, 0.07);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
 }
 .agent-appr-title {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 7px;
   font-size: 12px;
   font-weight: 600;
   color: var(--yellow);
-  margin-bottom: 7px;
+}
+.agent-appr-host {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 1px 8px;
 }
 .agent-appr-cmd {
   display: block;
-  font-family: var(--mono);
-  font-size: 12px;
-  background: var(--bg);
+  background: var(--cmd-bg);
+  border: 1px solid var(--border-soft);
   border-radius: 6px;
-  padding: 7px 9px;
+  padding: 7px 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--cmd-text);
   word-break: break-all;
-  margin-bottom: 6px;
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
+  user-select: text;
 }
-.agent-appr-actions { display: flex; gap: 8px; margin-top: 8px; }
+.agent-appr-actions { display: flex; gap: 8px; }
+.agent-appr-actions .small { font-size: 11.5px; padding: 5px 14px; }
 
-/* ---- detailed server IO rows (network rx/tx, disk read/write, etc.) ---- */
-.io-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px 10px;
-  margin-top: 9px;
+/* settings: agent authorization-scope selector */
+.policy-select {
+  flex: 1;
+  min-width: 0;
+  max-width: 220px;
+  font-size: 12px;
+  cursor: pointer;
 }
 .io-item {
   display: flex;
