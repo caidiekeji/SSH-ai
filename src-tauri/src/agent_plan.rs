@@ -351,10 +351,15 @@ mod tests {
 
     #[test]
     fn missing_contains_fails() {
-        let s = spec(None, &["active"], &[], None);
-        let o = verify_expectation(&s, Some(0), "inactive");
+        // Output must contain the needle as a substring; "running" is absent
+        // from "stopped", so the step must fail. (We avoid "inactive"/"active"
+        // here on purpose: `str::contains` matches the *substring* "active"
+        // inside "inactive", which is the intended behaviour — see the plan
+        // parser test that combines `contains` + `not_contains` to disambiguate.)
+        let s = spec(None, &["running"], &[], None);
+        let o = verify_expectation(&s, Some(0), "stopped");
         assert!(!o.passed);
-        assert!(o.failures[0].contains("active"));
+        assert!(o.failures[0].contains("running"));
     }
 
     #[test]
