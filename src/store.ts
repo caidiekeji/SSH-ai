@@ -152,6 +152,8 @@ export interface AgentStepRecord {
   verified?: boolean;
   /** Why the assertions failed. */
   verifyFailures?: string[];
+  /** Process exit code observed for this step (fed back to the model). */
+  exitCode?: number | null;
 }
 
 /** The approval request shown to the user. */
@@ -222,6 +224,28 @@ const describeExpect = (e: import("./types").ExpectSpec): string => {
   for (const c of e.notContains ?? []) parts.push(`输出不含「${c}」`);
   if (e.regex) parts.push(`输出匹配 /${e.regex}/`);
   return parts.length ? `（断言：${parts.join("；")}）` : "";
+};
+
+/**
+ * Fold the structured work memory into the goal string that is handed to the
+ * reactive planner (B: memory backfeed). The model cannot self-correct if it
+ * cannot see what already failed and why, so the cwd / confirmed facts /
+ * ruled-out hypotheses / failed attempts are injected here on every replan
+ * call. Keep it short — only the most recent ~8 failed attempts survive.
+ */
+const buildGoalWithMemory = (goal: string, m: AgentMemory): string => {
+  const lines: string[] = [];
+  if (m.cwd) lines.push(`当前工作目录：${m.cwd}`);
+  if (m.facts.length) lines.push("已确认的事实：\n- " + m.facts.slice(-6).join("\n- "));
+  if (m.hypotheses.length)
+    lines.push("已被证伪的假设：\n- " + m.hypotheses.slice(-6).join("\n- "));
+  if (m.failedAttempts.length)
+    lines.push(
+      "已失败的尝试（不要重复相同做法，换个思路）：\n- " +
+        m.failedAttempts.slice(-8).join("\n- "),
+    );
+  if (!lines.length) return goal;
+  return `${goal}\n\n[工作记忆]\n${lines.join("\n")}`;
 };
 
 // Previous raw byte/sector counters (for computing per-second rates).
@@ -721,24 +745,42 @@ export const useStore = create<Store>((set, get) => ({
     }
 
     // =====================================================================
-    // EXECUTOR + VERIFIER — run the plan, verify each step
+    // EXECUTOR + VERIFIER + REPLANNER
+    //   Phase 1: run the Planner's plan in dependency-respecting order.
+    //   Phase 2 (self-correction): when a step fails OR no assertion passed,
+    //            ask the model for the next action from observed output, then
+    //            act on it — the plan→execute→observe→replan loop (A).
     // =====================================================================
     let stepNo = 0;
     let verifiedCount = 0;
     let assertCount = 0;
-    let consecutiveFailures = 0;
+    /** Steps fed back to the model on every replan call (B: memory backfeed). */
+    const executed: import("./types").AgentStepHistory[] = [];
+    /** True when a spec carries at least one machine-checkable field. */
+    const isAssertive = (e?: import("./types").ExpectSpec | null): boolean =>
+      !!e &&
+      ((e.exitCode !== null && e.exitCode !== undefined) ||
+        (e.contains?.length ?? 0) > 0 ||
+        (e.notContains?.length ?? 0) > 0 ||
+        !!e.regex);
 
-    for (const planStep of plan.steps) {
-      if (!alive()) return;
-      if (stepNo >= MAX_STEPS) break;
-
-      const command = planStep.command;
+    // Run ONE action (a plan step, or a model-decided command/verify/pty) through
+    // the policy gate, the persistent shell, and the Rust verifier. Appends the
+    // result to both the UI list and the model-history list, and updates memory.
+    const runAction = async (action: {
+      command: string;
+      expect: import("./types").ExpectSpec | null;
+      kind: "exec" | "verify" | "pty";
+      description: string;
+      riskHint: string;
+    }): Promise<{ ok: boolean; verified: boolean | undefined; fatal?: boolean }> => {
       stepNo += 1;
+      if (stepNo > MAX_STEPS) return { ok: false, verified: undefined };
 
       // --- Policy: does this command need an individual confirmation? -------
       let assessment: RiskAssessment;
       try {
-        assessment = await ipc.assessRisk(command, planStep.riskHint || "read");
+        assessment = await ipc.assessRisk(action.command, action.riskHint || "read");
       } catch {
         assessment = {
           level: "yellow",
@@ -746,143 +788,68 @@ export const useStore = create<Store>((set, get) => ({
           reason: "本地分级器异常，按中风险处理",
         };
       }
-      if (!alive()) return;
+      if (!alive()) return { ok: false, verified: undefined };
 
       const isGreen = assessment.level === "green";
-      const inApprovedPlan = approvedCommands.has(command);
-      if (isGreen && autoGreen) {
-        // read-only, unattended
-      } else if (inApprovedPlan && planApproved) {
-        // inside the approved plan
-      } else {
+      const inApprovedPlan = approvedCommands.has(action.command);
+      if (!(isGreen && autoGreen) && !(inApprovedPlan && planApproved)) {
         const ok = await requestApproval(
-          command,
-          planStep.intent || "",
+          action.command,
+          action.description,
           assessment.level,
+          action.kind === "pty" ? action.command : undefined,
         );
         if (!ok) {
           set({ agentStatus: "stopped", agentError: "你拒绝了该命令，任务已停止" });
           audit("stopped");
-          return;
+          return { ok: false, verified: undefined };
         }
       }
-      if (!alive()) return;
+      if (!alive()) return { ok: false, verified: undefined };
 
       // --- Executor: run it on the persistent shell --------------------------
       let output = "";
       let exitCode: number | null = null;
       let maybeExecuted = false;
       try {
-        const resp = await ipc.agentExec(sessionId, command, execTimeout, "approved");
-        output = resp.output;
-        exitCode = resp.exitCode;
-        maybeExecuted = resp.maybeExecuted;
-        if (resp.cwd) setMemory({ cwd: resp.cwd });
-        if (resp.exitCode !== null && resp.exitCode !== 0) {
-          output += `\n（退出码 ${resp.exitCode}：命令未成功，请分析报错后再决定下一步）`;
+        if (action.kind === "pty") {
+          // Interactive terminal step: the user watches the PTY, so we read the
+          // local screen model afterwards instead of a structured result.
+          await ipc.agentPtyWrite(sessionId, action.command, "approved");
+          output = await ipc.readScreenTail(sessionId, 30).catch(() => "");
+          if (!output.trim()) output = "（已写入终端，未捕获到可见输出）";
+        } else {
+          const resp = await ipc.agentExec(sessionId, action.command, execTimeout, "approved");
+          output = resp.output;
+          exitCode = resp.exitCode;
+          maybeExecuted = resp.maybeExecuted;
+          if (resp.cwd) setMemory({ cwd: resp.cwd });
+          if (resp.exitCode !== null && resp.exitCode !== 0) {
+            output += `\n（退出码 ${resp.exitCode}：命令未成功，请分析报错后再决定下一步）`;
+          }
+          if (resp.timedOut) {
+            output += "\n（命令超时：执行通道已重置，cd/export 等状态可能已丢失）";
+          } else if (resp.shellGone) {
+            output += "\n（shell 已退出：执行通道已重置，cd/export 等状态可能已丢失）";
+          }
+          if (resp.maybeExecuted) {
+            output +=
+              "\n（重要：通道在返回结果前断开，该命令可能已在远端执行。请先用只读命令核实状态，不要直接重试。）";
+          }
+          if (!output.trim()) output = "（命令执行完成，无输出）";
         }
-        if (resp.timedOut) {
-          output += "\n（命令超时：执行通道已重置，cd/export 等状态可能已丢失）";
-        } else if (resp.shellGone) {
-          output += "\n（shell 已退出：执行通道已重置，cd/export 等状态可能已丢失）";
-        }
-        if (resp.maybeExecuted) {
-          output +=
-            "\n（重要：通道在返回结果前断开，该命令可能已在远端执行。请先用只读命令核实状态，不要直接重试。）";
-        }
-        if (!output.trim()) output = "（命令执行完成，无输出）";
       } catch (e) {
-        // Gate refusal or channel error: record it as a failed attempt so
-        // the model can change approach instead of repeating the same thing.
-        consecutiveFailures += 1;
-        const msg = `【执行被拒/失败】${String(e)}`;
+        // Gate refusal or channel error: record it as a failed attempt so the
+        // reactive planner can change approach instead of repeating it.
         set((s) => ({
           agentSteps: [
             ...s.agentSteps,
-            { no: stepNo, command, description: planStep.intent || "", output: msg, risk: assessment.level, kind: "exec" },
+            { no: stepNo, command: action.command, description: action.description, output: `【执行被拒/失败】${String(e)}`, risk: assessment.level, kind: action.kind },
           ],
         }));
-        memory.failedAttempts.push(`${command} → ${String(e)}`);
+        memory.failedAttempts.push(`${action.command} → ${String(e)}`);
         setMemory({});
-        if (consecutiveFailures >= 3) {
-          set({ agentStatus: "failed", agentError: `连续 ${consecutiveFailures} 次执行失败，任务中止：${String(e)}` });
-          audit("failed");
-          return;
-        }
-        continue;
-      }
-
-      // --- Verifier: Rust decides whether the assertions hold ---------------
-      let verified: boolean | undefined;
-      let verifyFailures: string[] = [];
-      const hasExpect =
-        planStep.expect &&
-        (planStep.expect.exitCode !== null &&
-          planStep.expect.exitCode !== undefined ||
-          (planStep.expect.contains?.length ?? 0) > 0 ||
-          (planStep.expect.notContains?.length ?? 0) > 0 ||
-          !!planStep.expect.regex);
-      if (hasExpect) {
-        assertCount += 1;
-        try {
-          const outcome = await ipc.agentVerify(planStep.expect, exitCode, output);
-          verified = outcome.passed;
-          verifyFailures = outcome.failures;
-        } catch (e) {
-          verified = false;
-          verifyFailures = [`断言校验失败：${String(e)}`];
-        }
-        if (verified) {
-          verifiedCount += 1;
-          memory.facts.push(`${planStep.intent || command} → 断言通过`);
-        } else {
-          memory.hypotheses.push(
-            `${planStep.intent || command} → 断言未通过（${verifyFailures.join("；") || "输出与预期不符"}）`,
-          );
-        }
-        setMemory({});
-      }
-
-      const kind: "exec" | "verify" = hasExpect ? "verify" : "exec";
-      const desc = hasExpect
-        ? `${planStep.intent || "验证"}${describeExpect(planStep.expect)}`
-        : planStep.intent || "";
-      set((s) => ({
-        agentSteps: [
-          ...s.agentSteps,
-          {
-            no: stepNo,
-            command,
-            description: desc,
-            output: trimForAi(output),
-            risk: assessment.level,
-            kind,
-            verified,
-            verifyFailures: verifyFailures.length ? verifyFailures : undefined,
-          },
-        ],
-      }));
-
-      // A step that ran but did not satisfy its assertions is a REAL failure:
-      // count it towards the consecutive-failure breaker.
-      if (verified === false || (verified === undefined && exitCode !== null && exitCode !== 0)) {
-        consecutiveFailures += 1;
-        memory.failedAttempts.push(
-          `${command} → ${verified === false ? verifyFailures.join("；") : `退出码 ${exitCode}`}`,
-        );
-        setMemory({});
-        if (consecutiveFailures >= 3) {
-          set({
-            agentStatus: "failed",
-            agentError: `连续 ${consecutiveFailures} 步未达成预期，任务中止：${
-              memory.failedAttempts[memory.failedAttempts.length - 1]
-            }`,
-          });
-          audit("failed");
-          return;
-        }
-      } else {
-        consecutiveFailures = 0;
+        return { ok: false, verified: undefined };
       }
 
       // The command may have executed remotely before the channel died —
@@ -892,7 +859,212 @@ export const useStore = create<Store>((set, get) => ({
           agentStatus: "failed",
           agentError:
             "通道在返回结果前断开：最后一条命令可能已在远端执行。为避免重复执行，任务已中止，请人工核实状态。",
+          agentSteps: [
+            ...get().agentSteps,
+            { no: stepNo, command: action.command, description: action.description, output: trimForAi(output), risk: assessment.level, kind: action.kind },
+          ],
         });
+        audit("failed");
+        return { ok: false, verified: undefined, fatal: true };
+      }
+
+      // --- Verifier: Rust decides whether the assertions hold ---------------
+      let verified: boolean | undefined;
+      let verifyFailures: string[] = [];
+      const expect = action.expect;
+      const hasExpect = isAssertive(expect);
+      if (hasExpect && expect) {
+        assertCount += 1;
+        try {
+          const outcome = await ipc.agentVerify(expect, exitCode, output);
+          verified = outcome.passed;
+          verifyFailures = outcome.failures;
+        } catch (e) {
+          verified = false;
+          verifyFailures = [`断言校验失败：${String(e)}`];
+        }
+        if (verified) {
+          verifiedCount += 1;
+          memory.facts.push(`${action.description || action.command} → 断言通过`);
+        } else {
+          memory.hypotheses.push(
+            `${action.description || action.command} → 断言未通过（${verifyFailures.join("；") || "输出与预期不符"}）`,
+          );
+        }
+        setMemory({});
+      }
+
+      const kind = action.kind;
+      const desc = hasExpect && expect ? `${action.description}${describeExpect(expect)}` : action.description;
+      set((s) => ({
+        agentSteps: [
+          ...s.agentSteps,
+          {
+            no: stepNo,
+            command: action.command,
+            description: desc,
+            output: trimForAi(output),
+            risk: assessment.level,
+            kind,
+            verified,
+            verifyFailures: verifyFailures.length ? verifyFailures : undefined,
+            exitCode: exitCode ?? undefined,
+          },
+        ],
+      }));
+      // Feed the result back to the reactive planner (B).
+      executed.push({
+        command: action.command,
+        output: trimForAi(output),
+        kind,
+        description: action.description,
+        expect: hasExpect && expect ? describeExpect(expect) : "",
+        verified: kind === "verify" ? verified : undefined,
+        exitCode,
+      });
+
+      // A step that ran but did not satisfy its assertions (or exited non-zero
+      // without one) is a REAL failure.
+      const ok = kind === "verify" ? verified === true : exitCode === null || exitCode === 0;
+      if (!ok) {
+        memory.failedAttempts.push(
+          `${action.command} → ${verified === false ? verifyFailures.join("；") : `退出码 ${exitCode}`}`,
+        );
+        setMemory({});
+      } else {
+        memory.facts.push(`${action.description || action.command} → 已完成`);
+      }
+      return { ok, verified };
+    };
+
+    // ---- Phase 1: execute the Planner's plan, respecting depends_on (C) ----
+    const byId = new Map<number, import("./types").PlanStep>();
+    plan.steps.forEach((s) => byId.set(s.id, s));
+    const doneIds = new Set<number>();
+    const failedIds = new Set<number>();
+    const skippedIds = new Set<number>();
+    const planQueue: import("./types").PlanStep[] = [...plan.steps];
+    let mode: "plan" | "reactive" = "plan";
+
+    while (mode === "plan") {
+      if (stepNo >= MAX_STEPS) break;
+      // Pick the next runnable planned step in dependency-respecting order.
+      let pickIdx = -1;
+      for (let i = 0; i < planQueue.length; i++) {
+        const s = planQueue[i];
+        // A step whose dependency already failed can never succeed → skip it.
+        const depsFailed = s.dependsOn.some((d) => skippedIds.has(d) || failedIds.has(d));
+        if (depsFailed) {
+          skippedIds.add(s.id);
+          planQueue.splice(i, 1);
+          i--;
+          continue;
+        }
+        if (s.dependsOn.every((d) => doneIds.has(d))) {
+          pickIdx = i;
+          break;
+        }
+      }
+      if (pickIdx === -1) {
+        // No more runnable planned steps. If a step actually failed, switch to
+        // reactive replanning; otherwise the plan simply finished (fall through
+        // to the final gate).
+        if (failedIds.size > 0) mode = "reactive";
+        break;
+      }
+      const planStep = planQueue.splice(pickIdx, 1)[0];
+      const res = await runAction({
+        command: planStep.command,
+        expect: planStep.expect,
+        kind: isAssertive(planStep.expect) ? "verify" : "exec",
+        description: planStep.intent || "",
+        riskHint: planStep.riskHint || "read",
+      });
+      if (res.fatal) return;
+      if (res.ok) doneIds.add(planStep.id);
+      else {
+        failedIds.add(planStep.id);
+        mode = "reactive"; // reality diverged → let the model re-decide
+      }
+    }
+
+    // If the plan ran but produced no passing assertion, let the model add a
+    // verification step (self-correction) before we declare failure.
+    if (mode === "plan" && verifiedCount === 0) {
+      mode = "reactive";
+    }
+
+    // ---- Phase 2: reactive replanning (observe → decide → act) (A) ----
+    let requireVerification = false;
+    let recoveryFails = 0;
+    while (mode === "reactive" && stepNo < MAX_STEPS) {
+      const goalWithMemory = buildGoalWithMemory(goal, memory);
+      let out: Awaited<ReturnType<typeof ipc.agentStep>>;
+      try {
+        out = await withRetry(() =>
+          ipc.agentStep(sessionId, goalWithMemory, executed, requireVerification, profileId, memory.cwd || null),
+        );
+      } catch (e) {
+        set({ agentStatus: "failed", agentError: `重规划失败：${String(e)}` });
+        audit("failed");
+        return;
+      }
+      // Defensive: a stray/empty action must not become a blind exec. Treat it
+      // as one failed replan attempt and let the next call correct course.
+      const hasCommand = out.action === "command" || out.action === "verify";
+      if (
+        (out.action !== "done" && out.action !== "giveup" && out.action !== "pty" && !hasCommand) ||
+        (hasCommand && !out.command)
+      ) {
+        recoveryFails += 1;
+        if (recoveryFails >= 8) {
+          set({ agentStatus: "failed", agentError: "重规划返回了无法执行的动作，任务中止。请人工核对。" });
+          audit("failed");
+          return;
+        }
+        continue;
+      }
+      if (out.action === "done") {
+        if (verifiedCount >= 1) {
+          set({ agentStatus: "done" });
+          audit("done");
+          return;
+        }
+        // Claimed done without proof — force a verification step next round.
+        requireVerification = true;
+        continue;
+      }
+      if (out.action === "giveup") {
+        set({ agentStatus: "failed", agentError: `Agent 放弃任务：${out.reason || "模型判断无法完成目标"}` });
+        audit("failed");
+        return;
+      }
+      if (out.action === "pty") {
+        const res = await runAction({
+          command: out.keys || "",
+          expect: null,
+          kind: "pty",
+          description: out.description || "终端交互操作",
+          riskHint: "write",
+        });
+        if (res.fatal) return;
+        if (!res.ok) recoveryFails += 1;
+        continue;
+      }
+      // command | verify
+      const isVerify = out.action === "verify";
+      const res = await runAction({
+        command: out.command || "",
+        expect: isVerify && out.expect ? { contains: [out.expect] } : null,
+        kind: isVerify ? "verify" : "exec",
+        description: out.description || out.reasoning || "",
+        riskHint: out.riskHint || "read",
+      });
+      if (res.fatal) return;
+      requireVerification = false;
+      if (!res.ok) recoveryFails += 1;
+      if (recoveryFails >= 8) {
+        set({ agentStatus: "failed", agentError: "多次重规划仍未达成一致，任务中止。请人工核对状态。" });
         audit("failed");
         return;
       }

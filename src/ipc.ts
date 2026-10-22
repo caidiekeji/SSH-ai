@@ -100,6 +100,7 @@ export const ipc = {
     steps: AgentStepHistory[],
     requireVerification?: boolean,
     profileId?: string | null,
+    agentCwd?: string | null,
   ) =>
     invoke<{
       action: "command" | "verify" | "done" | "giveup" | "pty";
@@ -111,7 +112,14 @@ export const ipc = {
       expect?: string;
       keys?: string;
       riskHint?: string;
-    }>("agent_step", { sessionId, goal, steps, requireVerification, profileId: profileId ?? null }),
+    }>("agent_step", {
+      sessionId,
+      goal,
+      steps,
+      requireVerification,
+      profileId: profileId ?? null,
+      agentCwd: agentCwd ?? null,
+    }),
 
   /** Planner: ONE model call produces the whole ordered plan. */
   agentPlan: (sessionId: number, goal: string, profileId?: string | null) =>
