@@ -210,6 +210,7 @@ function Composer() {
             aria-label="命令模式"
           >
             <Icon name="terminal" size={14} />
+            <span className="mode-label">命令</span>
           </button>
           <button
             className={`mode-chip ${mode === "diag" ? "active" : ""}`}
@@ -218,6 +219,7 @@ function Composer() {
             aria-label="诊断模式"
           >
             <Icon name="sparkles" size={14} />
+            <span className="mode-label">诊断</span>
           </button>
           <button
             className={`mode-chip ${mode === "agent" ? "active" : ""}`}
@@ -226,6 +228,7 @@ function Composer() {
             aria-label="Agent 模式"
           >
             <Icon name="zap" size={14} />
+            <span className="mode-label">Agent</span>
           </button>
           <button
             className={`mode-chip ${mode === "chat" ? "active" : ""}`}
@@ -234,6 +237,7 @@ function Composer() {
             aria-label="对话模式"
           >
             <Icon name="pencil" size={14} />
+            <span className="mode-label">对话</span>
           </button>
         </div>
         <button className="composer-send" onClick={send} disabled={!text.trim() || (mode === "chat" && chatBusy)}>
