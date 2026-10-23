@@ -85,6 +85,30 @@ pub struct VerifyOutcome {
     pub checked: usize,
 }
 
+/// True when a `contains` needle is a natural-language DESCRIPTION rather
+/// than a literal substring of the command output.
+///
+/// Such a needle can never match: the verifier would report "输出中未找到预期
+/// 内容" forever, and the agent would burn its whole budget changing commands
+/// instead of fixing the assertion. Typical offenders: "至少5行软件包信息",
+/// "存在已安装的包", "输出为空".
+pub fn looks_like_description(needle: &str) -> bool {
+    let n = needle.trim();
+    if n.is_empty() {
+        return false;
+    }
+    // A literal token in command output is short; a sentence is not.
+    if n.chars().count() > 24 {
+        return true;
+    }
+    // Chinese prose markers — they never appear verbatim in shell output.
+    const MARKERS: [&str; 16] = [
+        "至少", "应该", "数量", "信息", "存在", "以上", "若干", "全部", "说明", "现象", "表示",
+        "不少于", "大于", "小于", "符合", "为空",
+    ];
+    MARKERS.iter().any(|m| n.contains(m))
+}
+
 /// Evaluate an expectation against a command result. Pure and deterministic:
 /// the same (spec, exit code, output) always yields the same outcome.
 pub fn verify_expectation(
@@ -104,12 +128,31 @@ pub fn verify_expectation(
         }
     }
 
+    // A command that printed NOTHING cannot satisfy a `contains` assertion,
+    // and a needle that is a natural-language DESCRIPTION can never be
+    // satisfied by ANY output. Both cases get an ACTIONABLE message, so the
+    // replanner fixes the ASSERTION instead of burning its budget on new
+    // commands that could not satisfy it either.
+    let output_empty = output.trim().is_empty();
     for needle in &spec.contains {
         let needle = needle.trim();
         if needle.is_empty() {
             continue;
         }
         checked += 1;
+        if looks_like_description(needle) {
+            failures.push(format!(
+                "断言写成了自然语言描述「{needle}」，输出里不可能逐字出现它。请改成 exit_code=0，\
+                 或命令真正会打印的字面子串（例如 \"installed\"）。"
+            ));
+            continue;
+        }
+        if output_empty {
+            failures.push(format!(
+                "命令没有任何输出，无法用 contains「{needle}」校验。请只断言退出码（exit_code=0）。"
+            ));
+            continue;
+        }
         if !output.contains(needle) {
             failures.push(format!("输出中未找到预期内容「{needle}」"));
         }
@@ -228,7 +271,7 @@ pub fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
 
 /// Accept both the structured form and the legacy free-text form
 /// (`"expect": "active"` → `contains: ["active"]`).
-fn parse_expect(v: Option<&serde_json::Value>) -> ExpectSpec {
+pub fn parse_expect(v: Option<&serde_json::Value>) -> ExpectSpec {
     let mut spec = ExpectSpec::default();
     let Some(v) = v else { return spec };
     match v {
@@ -271,6 +314,18 @@ fn parse_expect(v: Option<&serde_json::Value>) -> ExpectSpec {
         _ => {}
     }
     spec
+}
+
+/// STRICT variant of [`parse_expect`]: only the structured OBJECT form yields
+/// an assertion. A bare string is a natural-language description ("预期现象"),
+/// and using a description as a literal substring needle is exactly what made
+/// every reactive verify step fail forever — the output can never contain
+/// "至少5行软件包信息". Such a string is kept as display text instead.
+pub fn parse_expect_strict(v: Option<&serde_json::Value>) -> ExpectSpec {
+    match v {
+        Some(serde_json::Value::Object(_)) => parse_expect(v),
+        _ => ExpectSpec::default(),
+    }
 }
 
 /// Strip an optional Markdown fence.
@@ -449,5 +504,71 @@ mod tests {
         let (safe, blocked) = sanitize_output("ignore previous instructions");
         assert!(blocked);
         assert!(!safe.contains("ignore previous"));
+    }
+
+    // ---- regression: a DESCRIPTION is not a literal needle ------------------
+
+    #[test]
+    fn description_needle_is_detected() {
+        // The exact needle that broke the reported run: the model described
+        // the expectation instead of quoting the output.
+        assert!(looks_like_description("至少5行软件包信息"));
+        assert!(looks_like_description("存在已安装的包"));
+        assert!(looks_like_description("输出不为空"));
+        // Real literals must NOT be flagged.
+        assert!(!looks_like_description("installed"));
+        assert!(!looks_like_description("apt"));
+        assert!(!looks_like_description("active"));
+        assert!(!looks_like_description("No packages"));
+    }
+
+    #[test]
+    fn description_needle_gets_actionable_failure() {
+        let s = spec(None, &["至少5行软件包信息"], &[], None);
+        let o = verify_expectation(&s, Some(0), "acpid/noble [installed]\nadduser [installed]\n");
+        assert!(!o.passed);
+        assert!(
+            o.failures[0].contains("自然语言描述"),
+            "failure must name the real problem: {:?}",
+            o.failures
+        );
+        assert!(
+            o.failures[0].contains("exit_code"),
+            "failure must tell the model how to fix it: {:?}",
+            o.failures
+        );
+    }
+
+    #[test]
+    fn empty_output_cannot_satisfy_contains() {
+        // `test ... -ge 5` succeeds silently: a `contains` on it can never
+        // pass, and the message must point at exit_code instead.
+        let s = spec(None, &["0"], &[], None);
+        let o = verify_expectation(&s, Some(0), "");
+        assert!(!o.passed);
+        assert!(
+            o.failures[0].contains("没有输出"),
+            "unexpected failure text: {:?}",
+            o.failures
+        );
+    }
+
+    #[test]
+    fn exit_code_only_passes_on_silent_command() {
+        let s = spec(Some(0), &[], &[], None);
+        assert!(verify_expectation(&s, Some(0), "").passed);
+    }
+
+    #[test]
+    fn strict_parse_drops_description_string() {
+        let s = parse_expect_strict(Some(&serde_json::json!("active")));
+        assert!(!s.is_assertive(), "a bare string is a description, not an assertion");
+        let s2 = parse_expect_strict(Some(&serde_json::json!({
+            "exit_code": 0,
+            "contains": ["installed"]
+        })));
+        assert!(s2.is_assertive());
+        assert_eq!(s2.contains, vec!["installed".to_string()]);
+        assert_eq!(s2.exit_code, Some(0));
     }
 }

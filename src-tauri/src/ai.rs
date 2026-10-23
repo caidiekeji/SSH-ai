@@ -324,7 +324,7 @@ pub const AGENT_SYSTEM_PROMPT: &str = r#"你是服务器自动化运维 Agent。
 1. 需要执行命令时：
 {"action":"command","command":"单行命令","description":"≤40字说明这步做什么","reasoning":"≤100字为什么","risk_hint":"read|write|destructive"}
 2. 需要验证目标是否达成时（只读命令）：
-{"action":"verify","command":"单行只读验证命令","expect":"≤40字预期现象","description":"≤40字验证什么"}
+{"action":"verify","command":"单行只读验证命令","expect":{"exit_code":0,"contains":["输出中会逐字出现的字面子串"],"not_contains":[],"regex":null},"description":"≤40字验证什么"}
 3. 目标已完成时：
 {"action":"done","summary":"≤80字完成情况（须引用验证结果）"}
 4. 无法完成时：
@@ -341,7 +341,18 @@ pub const AGENT_SYSTEM_PROMPT: &str = r#"你是服务器自动化运维 Agent。
 6. 不要重复执行已经成功且结果未变化的命令。
 7. 普通命令一律用 command（后台执行通道，有退出码）；pty 是例外而非常态：每次都会请求用户批准，输出只有终端画面。
 8. 若步骤输出出现「命令超时」「shell 已退出/通道已重置」，说明执行环境已重置（cd/export 丢失），后续命令要重新进入目录或使用绝对路径。
-9. 若命令失败/退出码非零，先读懂报错再换方法，不要原样重试。"#;
+9. 若命令失败/退出码非零，先读懂报错再换方法，不要原样重试。
+10. verify 的 expect 必须是可被程序机械校验的**结构化断言**（字段与计划步骤完全一致）：
+   - exit_code：该命令成功时的退出码（只读校验命令通常为 0）
+   - contains：输出中会**逐字出现**的子串（如 "installed"、"active"、"/usr/bin/apt"）
+   - not_contains：输出中不应出现的子串
+   - regex：可选
+   绝对不要把描述当断言：写 "至少5行软件包信息"、"存在已安装的包" 这类文字，程序永远匹配不到，验证必然失败。
+   若命令本身没有输出（如 test / [ -f ] 之类），只能断言 exit_code，不要写 contains。
+11. 断言失败时先读「断言失败原因」，再决定下一步：
+   - 若原因说"断言写成了自然语言描述"→ 改断言（换成结构化 expect），不要换命令；
+   - 若原因说"命令没有任何输出"→ 只断言 exit_code，不要换命令；
+   - 若原因说"输出中未找到预期内容"→ 才是输出与预期不符，换读命令或换字面子串。"#;
 
 // ---------------------------------------------------------------------------
 // Agent mode · PLANNER: one model call produces the whole ordered plan.
@@ -388,9 +399,16 @@ pub struct AgentStepOut {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_hint: Option<String>,
-    /// verify 动作：预期现象（供 UI 展示与下一步判断）。
+    /// verify 动作：预期。模型应返回结构化断言对象；也接受纯字符串
+    /// （视为「现象描述」，只用于展示，不参与机械校验）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expect: Option<String>,
+    pub expect: Option<serde_json::Value>,
+    /// 由 `expect` 归一化得到的结构化断言（仅对象形式会产生）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_spec: Option<crate::agent_plan::ExpectSpec>,
+    /// 纯文本描述（仅用于展示与提示词回传，不参与校验）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_text: Option<String>,
     /// pty 动作：要写入用户终端的按键文本（唯一保留换行的动作——\n 即回车）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<String>,
@@ -422,6 +440,10 @@ pub struct AgentStepIn {
     /// Exit code of the command, when known.
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// Why the assertions failed. Fed back verbatim so the model can fix the
+    /// ASSERTION instead of guessing a new command.
+    #[serde(default)]
+    pub failures: Vec<String>,
 }
 
 /// Strip an optional Markdown fence, then parse the agent JSON object.
@@ -461,6 +483,29 @@ pub fn parse_agent_response_obj(raw: &str) -> Result<AgentStepOut, String> {
             // pty keys keep '\n' (it IS the Enter key) but never stray CRs.
             if let Some(k) = out.keys.as_mut() {
                 *k = k.replace('\r', "");
+            }
+            // Normalize the expectation. An OBJECT is a machine-checkable
+            // assertion; a bare STRING is a natural-language description.
+            // Mixing the two is what made every reactive verify step fail
+            // forever: a description ("至少5行软件包信息") can never be found
+            // in the output by substring match, so the assertion was
+            // unsatisfiable by construction.
+            if let Some(v) = out.expect.clone() {
+                match &v {
+                    serde_json::Value::String(s) => {
+                        let t = s.trim().to_string();
+                        if !t.is_empty() {
+                            out.expect_text = Some(t);
+                        }
+                    }
+                    serde_json::Value::Object(_) => {
+                        let spec = crate::agent_plan::parse_expect_strict(Some(&v));
+                        if spec.is_assertive() {
+                            out.expect_spec = Some(spec);
+                        }
+                    }
+                    _ => {}
+                }
             }
             out
         })
@@ -527,6 +572,12 @@ pub async fn run_agent_step(
                 header.push_str(&format!(
                     "\n   断言校验: {}",
                     if v { "通过" } else { "未通过" }
+                ));
+            }
+            if !s.failures.is_empty() {
+                header.push_str(&format!(
+                    "\n   断言失败原因: {}",
+                    s.failures.join("；")
                 ));
             }
             user.push_str(&header);
@@ -630,7 +681,20 @@ mod tests {
         let raw = r#"{"action":"verify","command":"systemctl is-active nginx","expect":"active","description":"验证服务状态"}"#;
         let s = parse_agent_response_obj(raw).unwrap();
         assert_eq!(s.action, "verify");
-        assert_eq!(s.expect.as_deref(), Some("active"));
+        // A bare string is a DESCRIPTION: display only, never an assertion —
+        // using it as a literal needle made every reactive verify fail.
+        assert_eq!(s.expect_text.as_deref(), Some("active"));
+        assert!(s.expect_spec.is_none());
+    }
+
+    #[test]
+    fn parse_agent_verify_structured_expect() {
+        let raw = r#"{"action":"verify","command":"apt list --installed","expect":{"exit_code":0,"contains":["installed"],"not_contains":[],"regex":null},"description":"验证已安装包"}"#;
+        let s = parse_agent_response_obj(raw).unwrap();
+        let spec = s.expect_spec.expect("structured expect must become a spec");
+        assert_eq!(spec.exit_code, Some(0));
+        assert_eq!(spec.contains, vec!["installed".to_string()]);
+        assert!(s.expect_text.is_none());
     }
 
     #[test]

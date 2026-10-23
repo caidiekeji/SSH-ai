@@ -773,6 +773,10 @@ export const useStore = create<Store>((set, get) => ({
       kind: "exec" | "verify" | "pty";
       description: string;
       riskHint: string;
+      /** Advisory note for the model/UI (never part of the verified payload). */
+      note?: string;
+      /** The model's own wording of the expectation (fed back to the model). */
+      expectText?: string;
     }): Promise<{ ok: boolean; verified: boolean | undefined; fatal?: boolean }> => {
       stepNo += 1;
       if (stepNo > MAX_STEPS) return { ok: false, verified: undefined };
@@ -859,6 +863,10 @@ export const useStore = create<Store>((set, get) => ({
         return { ok: false, verified: undefined };
       }
 
+      // Advisory note for the model (and the UI): it rides on the ANNOTATED
+      // copy only — the Verifier always judges the raw payload.
+      if (action.note) output += `\n${action.note}`;
+
       // The command may have executed remotely before the channel died —
       // replaying it would run it twice. Stop and let the user decide.
       if (maybeExecuted) {
@@ -927,9 +935,13 @@ export const useStore = create<Store>((set, get) => ({
         output: trimForAi(output),
         kind,
         description: action.description,
-        expect: hasExpect && expect ? describeExpect(expect) : "",
+        expect: hasExpect && expect ? describeExpect(expect) : action.expectText || "",
         verified: kind === "verify" ? verified : undefined,
         exitCode,
+        // Feed the WHY back: without the reason, the model only sees
+        // "assertion failed" and thrashes on new commands instead of
+        // fixing the assertion itself.
+        failures: verifyFailures.length ? verifyFailures : undefined,
       });
 
       // A step that ran but did not satisfy its assertions (or exited non-zero
@@ -1062,12 +1074,27 @@ export const useStore = create<Store>((set, get) => ({
       }
       // command | verify
       const isVerify = out.action === "verify";
+      // The expectation must be a MACHINE-CHECKABLE spec. A plain-text
+      // description ("至少5行软件包信息") can never be found in the output by
+      // substring match, so it is NOT used as a needle: the step still runs,
+      // but it cannot count as verification, and the model is told exactly
+      // what to return instead. (Using a description as a literal needle is
+      // what made every reactive verify step fail forever.)
+      const spec = isVerify ? out.expectSpec ?? null : null;
+      const note =
+        isVerify && !spec
+          ? `（本次 verify 未提供结构化断言 expect${
+              out.expectText ? `（只给了描述「${out.expectText}」）` : ""
+            }，无法机械校验；请在下一步返回 expect:{"exit_code":0,"contains":["输出中会逐字出现的字面子串"]}）`
+          : undefined;
       const res = await runAction({
         command: out.command || "",
-        expect: isVerify && out.expect ? { contains: [out.expect] } : null,
+        expect: spec,
         kind: isVerify ? "verify" : "exec",
         description: out.description || out.reasoning || "",
         riskHint: out.riskHint || "read",
+        note,
+        expectText: out.expectText,
       });
       if (res.fatal) return;
       requireVerification = false;

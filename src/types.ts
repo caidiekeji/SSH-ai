@@ -177,4 +177,6 @@ export interface AgentStepHistory {
   expect: string;
   verified?: boolean | null;
   exitCode?: number | null;
+  /** Why the assertions failed — fed back so the model can fix the ASSERTION. */
+  failures?: string[];
 }

@@ -3,23 +3,22 @@
 //! the industry-standard fix (OpenHands/SWE-ReX pattern) for multi-step
 //! agents running on fresh shells.
 //!
-//! Protocol: every command is written as a small SCRIPT:
+//! Protocol: every command is written as ONE single line:
 //!
 //! ```text
-//! __aisa_cmd=$(cat <<'DELIM'
-//! <the user command, verbatim>
-//! DELIM
-//! )
-//! eval "$__aisa_cmd" < /dev/null
-//! __a=$?
-//! printf '\n\001AISA_RC:%d\002\001AISA_PWD:%s\002\n' "$__a" "$PWD"
+//! __aisa_cmd='<the user command, single-quoted>'; eval "$__aisa_cmd" < /dev/null; __a=$?; printf '\n\001AISA_RC:%d\002\001AISA_PWD:%s\002\n' "$__a" "$PWD"
 //! ```
 //!
-//! Why a heredoc + `eval` instead of `{ cmd ; }`:
+//! Why a single-quoted string instead of a heredoc:
 //!
-//! * The command text lands inside a QUOTED heredoc, so the remote parser
-//!   never sees it as code — a `#` comment, an unbalanced quote or a stray
-//!   brace cannot corrupt the protocol lines.
+//! * ONE line means the interactive shell never has to buffer a multi-line
+//!   construct. The previous heredoc form was split across several lines, and
+//!   a shell that echoes / re-reads them (readline continuation handling)
+//!   could lose the command body — the command then ran as an empty string
+//!   and produced NO output, which surfaced as a bogus assertion failure.
+//! * The command text lands inside SINGLE quotes, so the remote parser never
+//!   sees it as code — a `#` comment, an unbalanced quote or a stray brace
+//!   cannot corrupt the protocol lines. A literal `'` is escaped as `'\''`.
 //! * `eval` runs the text in the CURRENT shell, so `cd`/`export` still
 //!   persist (a subshell would lose them).
 //! * A syntax error inside `eval` is a RUNTIME error: the shell prints it and
@@ -31,6 +30,10 @@
 //! The reply frame carries the exit code AND the shell's current working
 //! directory (the agent's real cwd — not the stale one probed at connect
 //! time), so the planner can ground itself in reality.
+//!
+//! The handshake marker (`AISA_READY`) is consumed across SSH packet
+//! boundaries — a chunk-local search misses it when the marker is split, and
+//! the leftover marker would then leak into the FIRST command's payload.
 //!
 //! A timeout, a cancellation or a dead shell POISONS the channel: the driver
 //! drops it so the caller re-opens a fresh one on the next use (state reset is
@@ -45,9 +48,6 @@ const SENTINEL_TAIL: u8 = 0x02;
 const READY_MARK: &[u8] = b"\x01AISA_READY\x02";
 /// Hard cap per command: keep the TAIL when overflowing.
 const MAX_OUT: usize = 256 * 1024;
-/// Heredoc delimiter base. Extended until it no longer occurs in the command.
-const DELIM_BASE: &str = "AISA_CMD_EOF";
-
 /// Result of one agent command on the persistent shell.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,28 +83,24 @@ pub struct ShellHandle {
     pub cancel: watch::Sender<bool>,
 }
 
-/// Pick a heredoc delimiter that cannot occur in the command text.
-fn pick_delimiter(command: &str) -> String {
-    let mut delim = DELIM_BASE.to_string();
-    while command.contains(&delim) {
-        delim.push('_');
-    }
-    delim
-}
-
 /// Wrap a raw command into the sentinel protocol (pure, unit-tested).
 ///
-/// The command is placed verbatim inside a QUOTED heredoc, so the remote
-/// shell's parser never interprets it: `#` comments, unbalanced quotes and
-/// stray braces are impossible to smuggle into the protocol lines. `eval`
-/// then executes it in the current shell (keeping `cd`/`export` state) and a
-/// runtime syntax error can no longer kill the shell.
+/// The command is placed verbatim inside SINGLE quotes (a literal `'` is
+/// escaped as `'\''`), so the remote shell's parser never interprets it: `#`
+/// comments, unbalanced quotes and stray braces are impossible to smuggle in.
+/// `eval` then executes it in the current shell (keeping `cd`/`export` state)
+/// and a runtime syntax error can no longer kill the shell.
+///
+/// The whole wrapper is ONE line: an interactive shell must not have to
+/// buffer a multi-line construct, which is where the command body used to
+/// get lost (the command then ran as an empty string and produced no output).
 pub fn wrap_command(command: &str) -> String {
-    let d = pick_delimiter(command);
+    // A multi-line command cannot be carried by a single-quoted one-liner.
+    let cmd = command.replace(['\r', '\n'], " ");
+    let escaped = cmd.replace('\'', "'\\''");
     format!(
-        "__aisa_cmd=$(cat <<'{d}'\n{c}\n{d}\n)\neval \"$__aisa_cmd\" < /dev/null\n__a=$?\nprintf '\\n\\001AISA_RC:%d\\002\\001AISA_PWD:%s\\002\\n' \"$__a\" \"$PWD\"\n",
-        d = d,
-        c = command
+        "__aisa_cmd='{escaped}'; eval \"$__aisa_cmd\" < /dev/null; __a=$?; \
+         printf '\\n\\001AISA_RC:%d\\002\\001AISA_PWD:%s\\002\\n' \"$__a\" \"$PWD\"\n"
     )
 }
 
@@ -279,7 +275,10 @@ where
                 }
             }
 
-            // Drop leading/trailing blank lines (printf adds one before the frame).
+            // Drop leading/trailing blank lines (printf adds one before the
+            // frame) and any leftover handshake marker — protocol noise must
+            // never reach the command payload.
+            let out = strip_ready_mark(&out);
             let output = String::from_utf8_lossy(&out)
                 .trim_matches('\n')
                 .to_string();
@@ -321,11 +320,20 @@ async fn run_init<S>(c: &mut russh::Channel<S>)
 where
     S: Send + Sync + 'static + From<(russh::ChannelId, russh::ChannelMsg)>,
 {
-    const INIT: &str = "export PAGER=cat GIT_PAGER=cat AWS_PAGER='' TF_INPUT=0 DEBIAN_FRONTEND=noninteractive NO_COLOR=1; { . \"$HOME/.profile\"; . \"$HOME/.bashrc\"; } < /dev/null 2>/dev/null || true; set +e; printf '\\n\\001AISA_READY\\002\\n'";
+    // `stty -echo` is best effort: when the server allocates a PTY for the
+    // shell request, the terminal driver echoes everything we write — our own
+    // protocol line would then land in the command payload and pollute every
+    // assertion. Harmless without a tty (stderr is discarded).
+    const INIT: &str = "export PAGER=cat GIT_PAGER=cat AWS_PAGER='' TF_INPUT=0 DEBIAN_FRONTEND=noninteractive NO_COLOR=1; { . \"$HOME/.profile\"; . \"$HOME/.bashrc\"; } < /dev/null 2>/dev/null || true; set +e; stty -echo 2>/dev/null || true; printf '\\n\\001AISA_READY\\002\\n'";
     if c.data(INIT.as_bytes()).await.is_err() {
         return;
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    // Accumulate across SSH packets: the marker can be split by a packet
+    // boundary, and a chunk-local search would miss it. The handshake would
+    // then time out and the marker would leak into the FIRST command's
+    // payload — the stray "AISA_READY" the user saw in a command output.
+    let mut buf: Vec<u8> = Vec::new();
     loop {
         let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remain.is_zero() {
@@ -334,8 +342,15 @@ where
         match tokio::time::timeout(remain, c.wait()).await {
             Ok(Some(russh::ChannelMsg::Data { data }))
             | Ok(Some(russh::ChannelMsg::ExtendedData { data, .. })) => {
-                if data.windows(READY_MARK.len()).any(|w| w == READY_MARK) {
+                buf.extend_from_slice(&data);
+                if buf.windows(READY_MARK.len()).any(|w| w == READY_MARK) {
+                    // Everything up to and including the marker is init noise.
                     break;
+                }
+                // The marker never arrived: the init output is being dropped
+                // anyway, so keep the buffer small.
+                if buf.len() > 64 * 1024 {
+                    buf.clear();
                 }
             }
             Ok(Some(russh::ChannelMsg::Eof))
@@ -345,6 +360,27 @@ where
             Err(_) => break,
         }
     }
+}
+
+/// Remove every handshake marker from a payload.
+///
+/// Defensive net for the case where the handshake timed out (the marker then
+/// stays in the channel and would surface as noise in the next output).
+fn strip_ready_mark(buf: &[u8]) -> Vec<u8> {
+    if !buf.windows(READY_MARK.len()).any(|w| w == READY_MARK) {
+        return buf.to_vec();
+    }
+    let mut out = Vec::with_capacity(buf.len());
+    let mut i = 0usize;
+    while i < buf.len() {
+        if buf[i..].starts_with(READY_MARK) {
+            i += READY_MARK.len();
+            continue;
+        }
+        out.push(buf[i]);
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -361,30 +397,60 @@ mod tests {
     }
 
     #[test]
-    fn wrap_uses_quoted_heredoc() {
-        // The command must land inside a quoted heredoc so the remote parser
-        // never sees it as code.
+    fn wrap_is_single_line() {
+        // ONE line: an interactive shell must never have to buffer a
+        // multi-line construct — that is exactly where the command body used
+        // to get lost (the command then ran as an empty string and produced
+        // no output, surfacing as a bogus assertion failure).
         let w = wrap_command("echo hi");
-        assert!(w.contains("<<'AISA_CMD_EOF'"));
-        assert!(w.contains("\necho hi\n"));
+        assert_eq!(w.matches('\n').count(), 1, "wrapper must be one line");
+        assert!(w.starts_with("__aisa_cmd='echo hi';"));
+        assert!(w.ends_with('\n'));
+    }
+
+    #[test]
+    fn wrap_quotes_the_command() {
+        // The command lands inside single quotes: the remote parser never
+        // sees it as code.
+        let w = wrap_command("echo hi");
+        assert!(w.contains("__aisa_cmd='echo hi';"));
+    }
+
+    #[test]
+    fn wrap_escapes_single_quote() {
+        // A literal ' inside the command must not break out of the quoting.
+        let w = wrap_command("echo \"it's\"");
+        assert!(w.contains("__aisa_cmd='echo \"it'\\''s\"';"));
+    }
+
+    #[test]
+    fn wrap_flattens_newlines() {
+        // A multi-line command cannot travel inside a one-liner.
+        let w = wrap_command("for i in 1 2; do\n  echo $i\ndone");
+        assert_eq!(w.matches('\n').count(), 1, "wrapper must stay one line");
+        assert!(w.contains("for i in 1 2; do"));
+        assert!(w.contains("echo $i"));
+        assert!(w.contains("done"));
     }
 
     #[test]
     fn wrap_comment_cannot_eat_protocol() {
         // A `#` inside the command must not comment out the protocol lines:
-        // the heredoc keeps it verbatim.
+        // the single-quoted string keeps it verbatim.
         let w = wrap_command("echo hi # rm -rf /");
         assert!(w.contains("echo hi # rm -rf /"));
         assert!(w.contains("printf '\\n\\001AISA_RC"));
     }
 
     #[test]
-    fn delimiter_avoids_collision() {
-        let cmd = "echo AISA_CMD_EOF";
-        let w = wrap_command(cmd);
-        assert!(w.contains("<<'AISA_CMD_EOF_'"));
-        // The delimiter in the command text must not equal the real one.
-        assert!(w.contains("\necho AISA_CMD_EOF\n"));
+    fn ready_mark_never_reaches_the_payload() {
+        // A leftover handshake marker is protocol noise, never output.
+        assert!(strip_ready_mark(b"\x01AISA_READY\x02").is_empty());
+        assert_eq!(
+            strip_ready_mark(b"\x01AISA_READY\x02/usr/bin/apt\n"),
+            b"/usr/bin/apt\n".to_vec()
+        );
+        assert_eq!(strip_ready_mark(b"plain output"), b"plain output".to_vec());
     }
 
     #[test]

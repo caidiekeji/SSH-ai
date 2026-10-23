@@ -109,7 +109,12 @@ export const ipc = {
       reasoning?: string;
       summary?: string;
       reason?: string;
-      expect?: string;
+      /** Raw expectation as returned by the model (object or string). */
+      expect?: ExpectSpec | string;
+      /** Normalized machine-checkable assertion (object form only). */
+      expectSpec?: ExpectSpec;
+      /** Plain-text description of the expectation (display only). */
+      expectText?: string;
       keys?: string;
       riskHint?: string;
     }>("agent_step", {
