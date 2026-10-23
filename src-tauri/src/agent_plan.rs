@@ -547,8 +547,13 @@ mod tests {
         let o = verify_expectation(&s, Some(0), "");
         assert!(!o.passed);
         assert!(
-            o.failures[0].contains("没有输出"),
+            o.failures[0].contains("没有任何输出"),
             "unexpected failure text: {:?}",
+            o.failures
+        );
+        assert!(
+            o.failures[0].contains("exit_code"),
+            "failure must point at the exit code: {:?}",
             o.failures
         );
     }
