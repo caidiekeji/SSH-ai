@@ -1167,7 +1167,7 @@ export const useStore = create<Store>((set, get) => ({
       "END{ if (e) print e; else if (p) print p; else print \"\" }' /proc/mounts /proc/diskstats; " +
       "echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; " +
       "echo @CORES; nproc 2>/dev/null || echo 1; " +
-      "echo @UPTIME; uptime -p 2>/dev/null | cut -c4-";
+      "echo @UPTIME; cut -d' ' -f1 /proc/uptime";
     try {
       const out = await ipc.execOneshot(sessionId, probe);
       const sec = (tag: string) => {
@@ -1207,7 +1207,10 @@ export const useStore = create<Store>((set, get) => ({
           load1: l1 || 0,
           load5: l5 || 0,
           cores,
-          uptime: sec("UPTIME") || "-",
+          // Raw seconds from /proc/uptime — locale-independent, so the UI
+          // can render it in the user's language (uptime -p emits English
+          // and changes with the remote locale).
+          uptimeSec: Number(sec("UPTIME")) || 0,
         },
         serverError: "",
       });

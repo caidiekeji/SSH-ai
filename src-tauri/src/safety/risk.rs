@@ -766,7 +766,7 @@ mod tests {
              END{ if (e) print e; else if (p) print p; else print \"\" }' /proc/mounts /proc/diskstats; \
              echo @LOAD; cut -d' ' -f1-3 /proc/loadavg; \
              echo @CORES; nproc 2>/dev/null || echo 1; \
-             echo @UPTIME; uptime -p | cut -c4-";
+             echo @UPTIME; cut -d' ' -f1 /proc/uptime";
         let a = grade(probe, "");
         assert_eq!(
             a.level,

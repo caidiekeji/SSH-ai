@@ -123,7 +123,8 @@ export interface ServerInfo {
   load1: number;
   load5: number;
   cores: number;
-  uptime: string;
+  /** Seconds since boot (raw /proc/uptime value). */
+  uptimeSec: number;
 }
 
 export interface FileEntry {

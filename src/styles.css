@@ -298,14 +298,19 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 
 /* resource stat bars */
 .stats { display: flex; flex-direction: column; gap: 9px; margin-bottom: 4px; }
-.stat-head { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-dim); margin-bottom: 4px; }
+.stat-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 11.5px; color: var(--text-dim); margin-bottom: 4px; }
 .stat-head span:first-child { color: var(--text); font-weight: 600; }
-.stat-bar { height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
-.stat-fill { height: 100%; border-radius: 4px; transition: width 400ms ease; }
+/* Numbers in the mono face so neighbouring rows line up and can be
+   compared without reading every digit. */
+.stat-text { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+/* The track must be VISIBLE: --panel-2 is white on a #f6f8fa panel in the
+   light theme (and #21262d on #161b22 in the dark one), so a 0% metric
+   looked like a missing row entirely. */
+.stat-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.stat-fill { height: 100%; border-radius: 3px; transition: width 400ms ease; }
 .stat-fill.green { background: var(--green); }
 .stat-fill.yellow { background: var(--yellow); }
 .stat-fill.red { background: var(--red); }
-.uptime { font-size: 11.5px; color: var(--text-dim); }
 
 /* file manager */
 .file-path { display: flex; gap: 5px; margin-bottom: 8px; }
@@ -963,7 +968,7 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 .ico-dir { color: var(--accent); }
 .ico-file { color: var(--text-dim); }
 .stat-label { display: inline-flex; align-items: center; gap: 5px; color: var(--text); font-weight: 600; }
-.uptime { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-dim); }
+.uptime { display: inline-flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 11.5px; color: var(--text-dim); }
 .file-icon { display: inline-flex; }
 
 /* theme picker (inside settings) */
@@ -1657,31 +1662,53 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   font-size: 12px;
   cursor: pointer;
 }
+/* 服务器状态明细：真正是一张两列网格。
+   此前只有 grid-template-columns 而没有 display:grid，对块元素完全无效，
+   六项指标其实竖排成了六行。 */
+.io-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 14px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border-soft);
+}
+/* No card chrome: the bars above already carry the "card" reading, so the
+   detail rows stay as bare label/value pairs grouped by whitespace. */
 .io-item {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-family: var(--mono);
-  color: var(--text-dim);
-  background: var(--panel-2);
-  border: 1px solid var(--border-soft);
-  border-radius: 7px;
-  padding: 5px 8px;
+  justify-content: space-between;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.io-item .io-k {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+  flex-shrink: 0;
   white-space: nowrap;
 }
-.io-item .io-label {
-  font-family: var(--ui, inherit);
-  color: var(--faint);
-  flex-shrink: 0;
+.io-item .io-v {
+  color: var(--text);
+  font-weight: 500;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.io-item .ico-down { color: var(--accent); flex-shrink: 0; }
-.io-item .ico-up { color: var(--green); flex-shrink: 0; }
+.io-item .ico-down { color: var(--accent); }
+.io-item .ico-up { color: var(--green); }
+/* Disk throughput gets a neutral arrow: the accent/green pair already
+   means "network" and must not be reused for another dimension. */
+.io-item .ico-disk { color: var(--faint); }
 
 /* ============================================================
-   交互微调：模式切换不换行、发送按钮不换行、IO 明细自适应
+   交互微调：模式切换不换行、发送按钮不换行
    ============================================================ */
 .composer-modes {
   flex: 1;
@@ -1705,17 +1732,6 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   letter-spacing: 0;
 }
 .composer-foot { gap: 10px; }
-
-/* IO 明细：按宽度自适应列数，杜绝截断 */
-.io-grid {
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-}
-.io-item {
-  gap: 4px;
-  padding: 5px 9px;
-  font-size: 10.5px;
-  letter-spacing: 0.2px;
-}
 
 /* ---- 提示词库 ---- */
 .prompt-form {
@@ -1796,31 +1812,6 @@ button.primary, button:not([class]) { transition: filter 150ms ease, border-colo
   color: var(--text-dim);
 }
 .mini.icon-only:hover { color: var(--accent); border-color: var(--accent); }
-
-/* ---- IO cells: label left / value right ---- */
-.io-grid { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 5px 8px; }
-.io-item {
-  justify-content: space-between;
-  gap: 6px;
-  padding: 4px 9px;
-}
-.io-item .io-k {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-dim);
-  font-family: inherit;
-  flex-shrink: 0;
-}
-.io-item .io-v {
-  color: var(--text);
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.io-item .ico-down { color: var(--accent); }
-.io-item .ico-up { color: var(--green); }
 
 /* ---- file manager modal ---- */
 .fm-open { margin-top: 10px; width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px; }

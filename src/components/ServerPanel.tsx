@@ -9,11 +9,55 @@ import type { ConnectionConfig, FileEntry } from "../types";
 import { Icon } from "./Icon";
 import { HostFormFields, connFromForm, emptyHostForm, useKeyUpload, type HostFormValues } from "./HostForm";
 
-const fmtSize = (n: number) => {
-  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
-  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
-  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
-  return `${n} B`;
+const KiB = 1024;
+const MiB = 1024 * KiB;
+const GiB = 1024 * MiB;
+
+/**
+ * Number formatting for the server dashboard.
+ *
+ * One precision rule per unit tier, so the whole panel reads with a single
+ * rhythm instead of every metric choosing its own decimals:
+ *   - a value that rounds to zero prints as "0" — "0.00" carries no
+ *     information but looks precise;
+ *   - GB keeps one decimal (0.1 GB = 100 MB of headroom is worth showing);
+ *   - MB / KB drop the decimal entirely — the extra digit is noise in a
+ *     248 px column;
+ *   - rates below 1 KB/s print as "0 B/s" (sub-KB rates are noise).
+ */
+const fmtBytes = (n: number): string => {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  if (n >= GiB) return `${(n / GiB).toFixed(1)} GB`;
+  if (n >= MiB) return `${Math.round(n / MiB)} MB`;
+  if (n >= KiB) return `${Math.round(n / KiB)} KB`;
+  return `${Math.round(n)} B`;
+};
+
+const fmtRate = (n: number): string => {
+  if (!Number.isFinite(n) || n < KiB) return "0 B/s";
+  if (n >= GiB) return `${(n / GiB).toFixed(1)} GB/s`;
+  if (n >= MiB) return `${(n / MiB).toFixed(1)} MB/s`;
+  return `${Math.round(n / KiB)} KB/s`;
+};
+
+/** Load average keeps its conventional two decimals — 0.01 vs 0.00 matters. */
+const fmtLoad = (n: number): string => {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  const s = n.toFixed(2);
+  return parseFloat(s) === 0 ? "0" : s;
+};
+
+/** Uptime in Chinese, from raw seconds (no locale-dependent English string). */
+const fmtUptime = (sec: number): string => {
+  if (!Number.isFinite(sec) || sec <= 0) return "-";
+  const s = Math.floor(sec);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d} 天${h > 0 ? ` ${h} 小时` : ""}`;
+  if (h > 0) return `${h} 小时${m > 0 ? ` ${m} 分钟` : ""}`;
+  if (m > 0) return `${m} 分钟${s % 60 > 0 ? ` ${s % 60} 秒` : ""}`;
+  return `${s} 秒`;
 };
 
 export function ServerPanel() {
@@ -210,6 +254,16 @@ export function ServerPanel() {
   const memPct = serverInfo?.memTotal ? (serverInfo.memUsed / serverInfo.memTotal) * 100 : 0;
   const diskPct = serverInfo?.diskTotal ? (serverInfo.diskUsed / serverInfo.diskTotal) * 100 : 0;
   const loadPct = serverInfo ? Math.min(100, (serverInfo.load1 / Math.max(1, serverInfo.cores)) * 100) : 0;
+  // Load is a RATIO, not a fill level: 100% means every core is busy, and
+  // only beyond that is the box actually oversubscribed — so its thresholds
+  // sit one notch higher than the capacity bars.
+  const loadLevel = !serverInfo
+    ? "green"
+    : serverInfo.load1 >= serverInfo.cores
+      ? "red"
+      : serverInfo.load1 >= serverInfo.cores * 0.7
+        ? "yellow"
+        : "green";
 
   const goDir = (name: string) => {
     const base = files.path;
@@ -430,30 +484,55 @@ export function ServerPanel() {
           {serverError && <div className="error-text small-err">{serverError}</div>}
           {serverInfo && (
             <div className="stats">
-              <Stat icon="activity" label="内存" pct={memPct} text={`${fmtSize(serverInfo.memUsed)} / ${fmtSize(serverInfo.memTotal)}`} />
+              {/* Level metrics: memory / swap / disk / load — each is
+                  "used out of a total", so each gets the same shape:
+                  label + value + a bar the eye can compare at a glance. */}
+              <Stat
+                icon="cpu"
+                label="内存"
+                pct={memPct}
+                text={`${fmtBytes(serverInfo.memUsed)} / ${fmtBytes(serverInfo.memTotal)}`}
+                title="物理内存已用 / 总量"
+              />
               {serverInfo.swapTotal > 0 && (
                 <Stat
-                  icon="hardDrive"
+                  icon="memoryStick"
                   label="交换分区"
                   pct={serverInfo.swapTotal ? (serverInfo.swapUsed / serverInfo.swapTotal) * 100 : 0}
-                  text={`${fmtSize(serverInfo.swapUsed)} / ${fmtSize(serverInfo.swapTotal)}`}
+                  text={`${fmtBytes(serverInfo.swapUsed)} / ${fmtBytes(serverInfo.swapTotal)}`}
+                  title="Swap 已用 / 总量（为 0 说明系统未配置交换）"
                 />
               )}
-              <Stat icon="gauge" label="负载" pct={loadPct} text={`${serverInfo.load1.toFixed(2)} / ${serverInfo.cores} 核`} />
-              <Stat icon="hardDrive" label="磁盘 /" pct={diskPct} text={`${fmtSize(serverInfo.diskUsed)} / ${fmtSize(serverInfo.diskTotal)}`} />
+              <Stat
+                icon="hardDrive"
+                label="磁盘 /"
+                pct={diskPct}
+                text={`${fmtBytes(serverInfo.diskUsed)} / ${fmtBytes(serverInfo.diskTotal)}`}
+                title="根分区已用 / 总量"
+              />
+              <Stat
+                icon="gauge"
+                label="负载"
+                pct={loadPct}
+                level={loadLevel}
+                text={`${fmtLoad(serverInfo.load1)} / ${serverInfo.cores} 核`}
+                title="1 分钟平均负载 / 核心数，满核即为 100%"
+              />
+              {/* Flow metrics: what is moving RIGHT NOW. No card chrome —
+                  the bars above already own the "card" reading. */}
               <div className="io-grid">
-                <IOMetric icon="arrowDown" iconCls="ico-down" label="下行" value={`${fmtSize(serverInfo.netRxRate)}/s`} title="所有网卡合计下载速率（不含本机回环）" />
-                <IOMetric icon="arrowUp" iconCls="ico-up" label="上行" value={`${fmtSize(serverInfo.netTxRate)}/s`} title="所有网卡合计上传速率（不含本机回环）" />
-                <IOMetric label="磁盘读" value={`${fmtSize(serverInfo.diskReadRate)}/s`} title="根分区每秒读取（/proc/diskstats）" />
-                <IOMetric label="磁盘写" value={`${fmtSize(serverInfo.diskWriteRate)}/s`} title="根分区每秒写入（/proc/diskstats）" />
+                <IOMetric icon="arrowDown" iconCls="ico-down" label="下行" value={fmtRate(serverInfo.netRxRate)} title="所有网卡合计下载速率（不含本机回环）" />
+                <IOMetric icon="arrowUp" iconCls="ico-up" label="上行" value={fmtRate(serverInfo.netTxRate)} title="所有网卡合计上传速率（不含本机回环）" />
+                <IOMetric icon="arrowDown" iconCls="ico-disk" label="磁盘读" value={fmtRate(serverInfo.diskReadRate)} title="根分区每秒读取（/proc/diskstats）" />
+                <IOMetric icon="arrowUp" iconCls="ico-disk" label="磁盘写" value={fmtRate(serverInfo.diskWriteRate)} title="根分区每秒写入（/proc/diskstats）" />
                 {serverInfo.memAvailable > 0 && (
-                  <IOMetric label="可用内存" value={fmtSize(serverInfo.memAvailable)} title="当前可供新进程使用的物理内存" />
+                  <IOMetric label="可用内存" value={fmtBytes(serverInfo.memAvailable)} title="当前可供新进程使用的物理内存" />
                 )}
-                <IOMetric label="5m负载" value={serverInfo.load5.toFixed(2)} title="5 分钟平均负载" />
+                <IOMetric label="5 分钟负载" value={fmtLoad(serverInfo.load5)} title="5 分钟平均负载" />
               </div>
-              <div className="uptime">
-                <Icon name="clock" size={12} /> 已运行 {serverInfo.uptime}
-              </div>
+        <div className="uptime">
+          <Icon name="clock" size={12} /> 已运行 {fmtUptime(serverInfo.uptimeSec)}
+        </div>
             </div>
           )}
           {!serverInfo && !serverError && <div className="dim-note">读取中…</div>}
@@ -528,7 +607,7 @@ export function ServerPanel() {
                   </span>
                   <span className="file-name" title={`${e.name} · ${e.mtime}`} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
                     {e.name}
-                    {!e.dir && <em>{fmtSize(e.size)}</em>}
+                    {!e.dir && <em>{fmtBytes(e.size)}</em>}
                   </span>
                   <span className="file-ops">
                     <button className="icon-op" title={e.dir ? "打开" : "预览"} onClick={() => (e.dir ? goDir(e.name) : doPreview(e))}>
@@ -730,10 +809,27 @@ function IOMetric({
   );
 }
 
-function Stat({ icon, label, pct, text }: { icon: string; label: string; pct: number; text: string }) {
-  const level = pct >= 90 ? "red" : pct >= 70 ? "yellow" : "green";
+// One level metric: label left, value right, bar underneath. The value uses
+// the mono face so the numbers of neighbouring rows line up and can be
+// compared without reading them.
+function Stat({
+  icon,
+  label,
+  pct,
+  text,
+  title,
+  level,
+}: {
+  icon: string;
+  label: string;
+  pct: number;
+  text: string;
+  title?: string;
+  level?: "green" | "yellow" | "red";
+}) {
+  const lv = level ?? (pct >= 90 ? "red" : pct >= 70 ? "yellow" : "green");
   return (
-    <div className="stat">
+    <div className="stat" title={title}>
       <div className="stat-head">
         <span className="stat-label">
           <Icon name={icon} size={12} /> {label}
@@ -741,7 +837,7 @@ function Stat({ icon, label, pct, text }: { icon: string; label: string; pct: nu
         <span className="stat-text">{text}</span>
       </div>
       <div className="stat-bar">
-        <div className={`stat-fill ${level}`} style={{ width: `${Math.min(100, pct)}%` }} />
+        <div className={`stat-fill ${lv}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
       </div>
     </div>
   );
