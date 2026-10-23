@@ -1497,6 +1497,20 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
 .agent-plan-list li { display: flex; flex-direction: column; gap: 3px; }
 .agent-plan-list li.done .agent-plan-intent { color: var(--text-dim); }
 .agent-plan-intent { font-size: 12px; font-weight: 600; line-height: 1.5; word-break: break-word; }
+.agent-plan-required {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+  vertical-align: 1px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  user-select: none;
+}
 .agent-plan-cmd {
   font-family: var(--mono);
   font-size: 11px;

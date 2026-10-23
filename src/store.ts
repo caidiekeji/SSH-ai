@@ -4,6 +4,18 @@
 
 import { create } from "zustand";
 import { ipc } from "./ipc";
+import {
+  isAcceptanceSatisfied,
+  isAssertive,
+  isOverBudget,
+  isPlanApprovalRequired,
+  judgeDoneClaim,
+  mayRunUnattended,
+  pickRunnableStep,
+  resolveAcceptanceIds,
+  stepSucceeded,
+  trimHistory,
+} from "./agentPolicy";
 import type {
   AiConfigState,
   ConnectionConfig,
@@ -116,6 +128,8 @@ interface Store {
   agentPlan: import("./types").AgentPlan | null;
   /** Structured work memory: cwd / facts / hypotheses / failed attempts. */
   agentMemory: AgentMemory;
+  /** Neutral note shown next to the result (skipped steps, budget warnings). */
+  agentNotice: string;
   _agentResolve: ((ok: boolean) => void) | null;
   /** Run token: a fresh startAgent invalidates any previous loop. */
   _agentRunId: number;
@@ -614,6 +628,7 @@ export const useStore = create<Store>((set, get) => ({
   agentPlan: null,
   /** Structured work memory: cwd / facts / hypotheses / failed attempts. */
   agentMemory: { cwd: "", facts: [], hypotheses: [], failedAttempts: [] },
+  agentNotice: "",
   _agentResolve: null as ((ok: boolean) => void) | null,
   _agentRunId: 0,
   startAgent: (goal) => {
@@ -627,6 +642,7 @@ export const useStore = create<Store>((set, get) => ({
       agentSteps: [],
       agentApproval: null,
       agentError: "",
+      agentNotice: "",
       _agentRunId: runId,
     });
     void get().agentLoop(runId);
@@ -641,10 +657,27 @@ export const useStore = create<Store>((set, get) => ({
     //   State    → cwd / facts / hypotheses / failed attempts feed back
     // =========================================================================
     const MAX_STEPS = 24;
+    /** Hard cap on model calls for ONE task (1 planner + N replans). */
+    const MAX_LLM_CALLS = 40;
+    /** Wall-clock ceiling for the whole task. */
+    const MAX_WALL_MS = 15 * 60 * 1000;
+    /** Char budget for the history handed back to the model on every replan. */
+    const HISTORY_CHAR_BUDGET = 24000;
 
     const audit = (status: string) => {
       const st = get();
       void ipc.saveAgentLog(st.agentGoal, status, st.agentSteps);
+    };
+
+    // Every failure path funnels through here, so a user-initiated stop is
+    // never overwritten by a later failure ("已停止" must stay "已停止").
+    const failTask = (message: string) => {
+      if (get().agentStatus === "stopped") {
+        audit("stopped");
+        return;
+      }
+      set({ agentStatus: "failed", agentError: message });
+      audit("failed");
     };
 
     // --- sessionId is FROZEN for the whole task -------------------------------
@@ -670,6 +703,12 @@ export const useStore = create<Store>((set, get) => ({
     const profileId = get().activeProfileId;
     const goal = get().agentGoal;
 
+    // --- budgets (C5: every autonomous loop needs a stop condition) ---------
+    const startedAt = Date.now();
+    let llmCalls = 0;
+    const outOfBudget = () =>
+      isOverBudget(llmCalls, MAX_LLM_CALLS, Date.now() - startedAt, MAX_WALL_MS);
+
     // --- State layer: structured work memory ----------------------------------
     const memory: AgentMemory = { cwd: "", facts: [], hypotheses: [], failedAttempts: [] };
     const setMemory = (patch: Partial<AgentMemory>) => {
@@ -681,7 +720,12 @@ export const useStore = create<Store>((set, get) => ({
     // "readonly": only read-only commands run unattended.
     // "plan":    commands belonging to the APPROVED plan run unattended.
     // "step":    every write command is confirmed individually.
-    let planApproved = policy === "plan";
+    //
+    // `planApproved` is set ONLY by the user's explicit approval below.
+    // It used to be initialised as `policy === "plan"`, which made the
+    // approval branch unreachable (`policy === "plan" && !planApproved` was
+    // always false) — the "批准计划" scope then behaved exactly like "逐条确认".
+    let planApproved = false;
     const approvedCommands = new Set<string>();
 
     // Ask the user for approval. Returns true when the command may run.
@@ -706,33 +750,51 @@ export const useStore = create<Store>((set, get) => ({
     // =====================================================================
     // PLANNER — one model call produces the whole plan
     // =====================================================================
-    let plan: import("./types").AgentPlan | null = null;
+    // The connect-time cwd probe ran in the USER'S PTY channel and never saw
+    // the agent shell's own directory. Probe the execution channel once
+    // BEFORE planning, so the plan's relative-path commands land where they
+    // will actually run.
+    let agentCwd = "";
     try {
-      plan = await withRetry(() => ipc.agentPlan(sessionId, goal, profileId));
+      const probe = await ipc.execOneshot(sessionId, "pwd", 10);
+      agentCwd = probe.trim().split("\n").filter(Boolean).pop()?.trim() ?? "";
+    } catch {
+      agentCwd = "";
+    }
+    if (agentCwd) setMemory({ cwd: agentCwd });
+
+    let plan: import("./types").AgentPlan | null = null;
+    llmCalls += 1;
+    try {
+      plan = await withRetry(() =>
+        ipc.agentPlan(sessionId, goal, profileId, agentCwd || null),
+      );
       set({ agentPlan: plan });
     } catch (e) {
-      if (alive()) {
-        set({ agentStatus: "failed", agentError: `规划失败：${String(e)}` });
-        audit("failed");
-      }
+      if (alive()) failTask(`规划失败：${String(e)}`);
       return;
     }
     if (!alive()) return;
     if (!plan || plan.steps.length === 0) {
-      set({ agentStatus: "failed", agentError: "AI 未产出可执行的计划" });
-      audit("failed");
+      failTask("AI 未产出可执行的计划");
       return;
     }
 
     // Under the "plan" scope the user approves the WHOLE plan once, so the
     // individual write commands do not interrupt the task step by step.
-    if (policy === "plan" && !planApproved) {
+    if (isPlanApprovalRequired(policy, planApproved)) {
+      // The approval must show what is actually being authorized: the
+      // command text (not just the intent) and which steps are the
+      // acceptance criteria.
       const summary = plan.steps
-        .map((s, i) => `${i + 1}. ${s.intent || s.command}`)
+        .map((s, i) => {
+          const tag = s.required ? " 〔验收步骤〕" : "";
+          return `${i + 1}. ${s.intent || "（未说明意图）"}${tag}\n     $ ${s.command}`;
+        })
         .join("\n");
       const ok = await requestApproval(
         `【执行计划】共 ${plan.steps.length} 步\n${summary}`,
-        "批准后，计划内的命令将不再逐条询问",
+        "批准后，计划内的命令将不再逐条询问；标记为〔验收步骤〕的步骤断言全部通过才算任务完成。",
         "yellow",
       );
       if (!ok) {
@@ -756,13 +818,41 @@ export const useStore = create<Store>((set, get) => ({
     let assertCount = 0;
     /** Steps fed back to the model on every replan call (B: memory backfeed). */
     const executed: import("./types").AgentStepHistory[] = [];
-    /** True when a spec carries at least one machine-checkable field. */
-    const isAssertive = (e?: import("./types").ExpectSpec | null): boolean =>
-      !!e &&
-      ((e.exitCode !== null && e.exitCode !== undefined) ||
-        (e.contains?.length ?? 0) > 0 ||
-        (e.notContains?.length ?? 0) > 0 ||
-        !!e.regex);
+    // --- Acceptance criteria (the Verifier's verdict on "done") -------------
+    // "Task done" must be backed by evidence that the GOAL was reached — not
+    // merely that some assertion passed somewhere in the run. The planner
+    // marks the step(s) that verify the goal itself with `required: true`;
+    // when it marks none, fall back to the LAST assertive step of the plan.
+    //
+    // A `required` step WITHOUT an assertion is not a usable criterion (it
+    // could never be satisfied), so it is filtered out here.
+    const acceptanceIds = resolveAcceptanceIds(plan.steps);
+    /** Required plan steps whose assertions passed. */
+    const passedAcceptance = new Set<number>();
+    /** The reactive phase produced a passing re-check of the goal. */
+    let reactiveVerified = false;
+    /** stepNo of the most recent PASSING verification. */
+    let lastPassAt = -1;
+    /** stepNo of the most recent FAILED step. */
+    let lastFailAt = -1;
+    /**
+     * Is the goal demonstrably achieved?
+     *
+     * Three conditions, all required:
+     *  1. there IS something to prove against (no assertion → no verdict);
+     *  2. the evidence is FRESH — a verification that happened BEFORE the
+     *     last failure no longer proves anything (the failed step may have
+     *     undone it);
+     *  3. either every required plan step passed, or the reactive phase
+     *     produced a fresh passing verification.
+     */
+    const acceptanceOk = () =>
+      isAcceptanceSatisfied(acceptanceIds, {
+        passedStepIds: [...passedAcceptance],
+        reactiveVerified,
+        lastPassAt,
+        lastFailAt,
+      });
 
     // Run ONE action (a plan step, or a model-decided command/verify/pty) through
     // the policy gate, the persistent shell, and the Rust verifier. Appends the
@@ -794,9 +884,51 @@ export const useStore = create<Store>((set, get) => ({
       }
       if (!alive()) return { ok: false, verified: undefined };
 
+      // A step that never ran is still INFORMATION for the reactive planner:
+      // it must see "this command was refused" instead of silently retrying
+      // the same thing.
+      const recordRefusal = (reason: string) => {
+        set((s) => ({
+          agentSteps: [
+            ...s.agentSteps,
+            {
+              no: stepNo,
+              command: action.command,
+              description: action.description,
+              output: reason,
+              risk: assessment.level,
+              kind: action.kind,
+            },
+          ],
+        }));
+        executed.push({
+          command: action.command,
+          output: reason,
+          kind: action.kind,
+          description: action.description,
+          expect: action.expectText || "",
+          verified: undefined,
+          exitCode: null,
+        });
+      };
+
       const isGreen = assessment.level === "green";
       const inApprovedPlan = approvedCommands.has(action.command);
-      if (!(isGreen && autoGreen) && !(inApprovedPlan && planApproved)) {
+
+      // RED = blacklist hit. The Rust gate refuses it unconditionally, so
+      // asking the user "do you approve?" would offer a button that can only
+      // fail. Refuse the step HERE, tell the planner why, and let it find
+      // another route — the task survives, only this command dies.
+      if (assessment.level === "red") {
+        const reason = `【已拒绝】命中黑名单规则「${assessment.rule}」——${assessment.reason}。该命令不会被执行，请换一种方式达成目标。`;
+        recordRefusal(reason);
+        memory.failedAttempts.push(`${action.command} → 命中黑名单「${assessment.rule}」，已拒绝执行`);
+        setMemory({});
+        lastFailAt = stepNo;
+        return { ok: false, verified: undefined };
+      }
+
+      if (!mayRunUnattended(assessment.level, autoGreen, inApprovedPlan, planApproved)) {
         const ok = await requestApproval(
           action.command,
           action.description,
@@ -820,6 +952,7 @@ export const useStore = create<Store>((set, get) => ({
       let rawOutput = "";
       let exitCode: number | null = null;
       let maybeExecuted = false;
+      let timedOut = false;
       try {
         if (action.kind === "pty") {
           // Interactive terminal step: the user watches the PTY, so we read the
@@ -834,6 +967,7 @@ export const useStore = create<Store>((set, get) => ({
           output = resp.output;
           exitCode = resp.exitCode;
           maybeExecuted = resp.maybeExecuted;
+          timedOut = resp.timedOut;
           if (resp.cwd) setMemory({ cwd: resp.cwd });
           if (resp.exitCode !== null && resp.exitCode !== 0) {
             output += `\n（退出码 ${resp.exitCode}：命令未成功，请分析报错后再决定下一步）`;
@@ -852,14 +986,10 @@ export const useStore = create<Store>((set, get) => ({
       } catch (e) {
         // Gate refusal or channel error: record it as a failed attempt so the
         // reactive planner can change approach instead of repeating it.
-        set((s) => ({
-          agentSteps: [
-            ...s.agentSteps,
-            { no: stepNo, command: action.command, description: action.description, output: `【执行被拒/失败】${String(e)}`, risk: assessment.level, kind: action.kind },
-          ],
-        }));
+        recordRefusal(`【执行被拒/失败】${String(e)}`);
         memory.failedAttempts.push(`${action.command} → ${String(e)}`);
         setMemory({});
+        lastFailAt = stepNo;
         return { ok: false, verified: undefined };
       }
 
@@ -870,16 +1000,33 @@ export const useStore = create<Store>((set, get) => ({
       // The command may have executed remotely before the channel died —
       // replaying it would run it twice. Stop and let the user decide.
       if (maybeExecuted) {
-        set({
-          agentStatus: "failed",
-          agentError:
-            "通道在返回结果前断开：最后一条命令可能已在远端执行。为避免重复执行，任务已中止，请人工核实状态。",
+        set((s) => ({
           agentSteps: [
-            ...get().agentSteps,
+            ...s.agentSteps,
             { no: stepNo, command: action.command, description: action.description, output: trimForAi(output), risk: assessment.level, kind: action.kind },
           ],
-        });
-        audit("failed");
+        }));
+        failTask(
+          "通道在返回结果前断开：最后一条命令可能已在远端执行。为避免重复执行，任务已中止，请人工核实状态。",
+        );
+        return { ok: false, verified: undefined, fatal: true };
+      }
+
+      // A TIMEOUT is a DIFFERENT situation from `maybeExecuted`: we simply
+      // stopped waiting and closed the channel on purpose. A read-only
+      // command that timed out is safe to run again — the step just failed
+      // and the planner picks another approach. A WRITE command may still be
+      // running remotely, so stop and let a human check.
+      if (timedOut && !isGreen) {
+        set((s) => ({
+          agentSteps: [
+            ...s.agentSteps,
+            { no: stepNo, command: action.command, description: action.description, output: trimForAi(output), risk: assessment.level, kind: action.kind },
+          ],
+        }));
+        failTask(
+          "写操作超时，远端可能仍在执行，任务已中止。请人工核实远端状态后再继续。",
+        );
         return { ok: false, verified: undefined, fatal: true };
       }
 
@@ -902,6 +1049,7 @@ export const useStore = create<Store>((set, get) => ({
         }
         if (verified) {
           verifiedCount += 1;
+          lastPassAt = stepNo;
           memory.facts.push(`${action.description || action.command} → 断言通过`);
         } else {
           memory.hypotheses.push(
@@ -946,8 +1094,15 @@ export const useStore = create<Store>((set, get) => ({
 
       // A step that ran but did not satisfy its assertions (or exited non-zero
       // without one) is a REAL failure.
-      const ok = kind === "verify" ? verified === true : exitCode === null || exitCode === 0;
+      //
+      // `exitCode === null` means "we never learned the exit code" (timeout,
+      // or the shell died before the command ran). It is NOT success: a
+      // command that never executed must never satisfy a dependency.
+      // `pty` steps have no exit code by nature — they are judged by the
+      // user's terminal, so they count as executed.
+      const ok = stepSucceeded(kind, verified, exitCode);
       if (!ok) {
+        lastFailAt = stepNo;
         memory.failedAttempts.push(
           `${action.command} → ${verified === false ? verifyFailures.join("；") : `退出码 ${exitCode}`}`,
         );
@@ -959,8 +1114,6 @@ export const useStore = create<Store>((set, get) => ({
     };
 
     // ---- Phase 1: execute the Planner's plan, respecting depends_on (C) ----
-    const byId = new Map<number, import("./types").PlanStep>();
-    plan.steps.forEach((s) => byId.set(s.id, s));
     const doneIds = new Set<number>();
     const failedIds = new Set<number>();
     const skippedIds = new Set<number>();
@@ -969,31 +1122,29 @@ export const useStore = create<Store>((set, get) => ({
 
     while (mode === "plan") {
       if (stepNo >= MAX_STEPS) break;
+      // The user may have stopped the task while we were executing.
+      if (!alive()) return;
       // Pick the next runnable planned step in dependency-respecting order.
-      let pickIdx = -1;
-      for (let i = 0; i < planQueue.length; i++) {
-        const s = planQueue[i];
-        // A step whose dependency already failed can never succeed → skip it.
-        const depsFailed = s.dependsOn.some((d) => skippedIds.has(d) || failedIds.has(d));
-        if (depsFailed) {
-          skippedIds.add(s.id);
-          planQueue.splice(i, 1);
-          i--;
-          continue;
-        }
-        if (s.dependsOn.every((d) => doneIds.has(d))) {
-          pickIdx = i;
-          break;
+      const picked = pickRunnableStep(planQueue, doneIds, failedIds, skippedIds);
+      // Steps dropped because a dependency can never succeed are REPORTED,
+      // not silently swallowed.
+      if (picked.skipped.length > 0) {
+        const drop = new Set(picked.skipped.map((s) => s.id));
+        for (let i = planQueue.length - 1; i >= 0; i--) {
+          if (drop.has(planQueue[i].id)) planQueue.splice(i, 1);
         }
       }
-      if (pickIdx === -1) {
+      if (!picked.pick) {
         // No more runnable planned steps. If a step actually failed, switch to
         // reactive replanning; otherwise the plan simply finished (fall through
         // to the final gate).
         if (failedIds.size > 0) mode = "reactive";
         break;
       }
-      const planStep = planQueue.splice(pickIdx, 1)[0];
+      const planStep = picked.pick;
+      // It is being executed now — take it out of the queue.
+      const at = planQueue.findIndex((q) => q.id === planStep.id);
+      if (at >= 0) planQueue.splice(at, 1);
       const res = await runAction({
         command: planStep.command,
         expect: planStep.expect,
@@ -1002,32 +1153,65 @@ export const useStore = create<Store>((set, get) => ({
         riskHint: planStep.riskHint || "read",
       });
       if (res.fatal) return;
-      if (res.ok) doneIds.add(planStep.id);
-      else {
+      if (res.ok) {
+        doneIds.add(planStep.id);
+        if (res.verified === true && acceptanceIds.includes(planStep.id)) {
+          passedAcceptance.add(planStep.id);
+        }
+      } else {
         failedIds.add(planStep.id);
         mode = "reactive"; // reality diverged → let the model re-decide
       }
     }
 
-    // If the plan ran but produced no passing assertion, let the model add a
-    // verification step (self-correction) before we declare failure.
-    if (mode === "plan" && verifiedCount === 0) {
+    // If the plan ran but the acceptance criteria are NOT satisfied, let the
+    // model add a verification step (self-correction) before we declare
+    // failure.
+    if (mode === "plan" && !acceptanceOk()) {
       mode = "reactive";
     }
 
     // ---- Phase 2: reactive replanning (observe → decide → act) (A) ----
     let requireVerification = false;
     let recoveryFails = 0;
+    /**
+     * How many times the model claimed "done" without any proof.
+     *
+     * This path never consumes a step (`stepNo` only grows inside runAction),
+     * so MAX_STEPS does NOT protect it — without this counter a model that
+     * keeps answering "done" would spin here forever, burning one LLM call
+     * per iteration.
+     */
+    let unprovenDone = 0;
+    const MAX_UNPROVEN_DONE = 3;
     while (mode === "reactive" && stepNo < MAX_STEPS) {
+      // The user may have stopped the task while we were waiting for the
+      // model — do not spend another call on a dead task.
+      if (!alive()) return;
+      if (outOfBudget()) {
+        failTask(
+          `任务超出预算（模型调用 ${llmCalls}/${MAX_LLM_CALLS} 次，用时 ${Math.round(
+            (Date.now() - startedAt) / 1000,
+          )}s），任务中止。请人工核对。`,
+        );
+        return;
+      }
       const goalWithMemory = buildGoalWithMemory(goal, memory);
       let out: Awaited<ReturnType<typeof ipc.agentStep>>;
+      llmCalls += 1;
       try {
         out = await withRetry(() =>
-          ipc.agentStep(sessionId, goalWithMemory, executed, requireVerification, profileId, memory.cwd || null),
+          ipc.agentStep(
+            sessionId,
+            goalWithMemory,
+            trimHistory(executed, HISTORY_CHAR_BUDGET),
+            requireVerification,
+            profileId,
+            memory.cwd || null,
+          ),
         );
       } catch (e) {
-        set({ agentStatus: "failed", agentError: `重规划失败：${String(e)}` });
-        audit("failed");
+        failTask(`重规划失败：${String(e)}`);
         return;
       }
       // Defensive: a stray/empty action must not become a blind exec. Treat it
@@ -1039,25 +1223,34 @@ export const useStore = create<Store>((set, get) => ({
       ) {
         recoveryFails += 1;
         if (recoveryFails >= 8) {
-          set({ agentStatus: "failed", agentError: "重规划返回了无法执行的动作，任务中止。请人工核对。" });
-          audit("failed");
+          failTask("重规划返回了无法执行的动作，任务中止。请人工核对。");
           return;
         }
         continue;
       }
       if (out.action === "done") {
-        if (verifiedCount >= 1) {
+        const verdict = judgeDoneClaim(acceptanceOk(), unprovenDone, MAX_UNPROVEN_DONE);
+        if (verdict.accept) {
           set({ agentStatus: "done" });
           audit("done");
           return;
         }
-        // Claimed done without proof — force a verification step next round.
-        requireVerification = true;
+        // Claimed done WITHOUT proof — force a verification step next round.
+        // The verdict counts the attempts: this branch consumes no step, so
+        // it needs its own stop condition (otherwise the model could spin
+        // here forever, one LLM call per iteration).
+        requireVerification = verdict.requireVerification;
+        unprovenDone += 1;
+        if (verdict.abort) {
+          failTask(
+            `模型连续 ${unprovenDone} 次声称任务完成，但始终没有通过验收断言，任务中止。请人工核对。`,
+          );
+          return;
+        }
         continue;
       }
       if (out.action === "giveup") {
-        set({ agentStatus: "failed", agentError: `Agent 放弃任务：${out.reason || "模型判断无法完成目标"}` });
-        audit("failed");
+        failTask(`Agent 放弃任务：${out.reason || "模型判断无法完成目标"}`);
         return;
       }
       if (out.action === "pty") {
@@ -1098,31 +1291,47 @@ export const useStore = create<Store>((set, get) => ({
       });
       if (res.fatal) return;
       requireVerification = false;
+      // A passing reactive verification IS evidence about the goal — it is
+      // the model's re-check after the plan diverged.
+      if (isVerify && res.verified === true) reactiveVerified = true;
       if (!res.ok) recoveryFails += 1;
       if (recoveryFails >= 8) {
-        set({ agentStatus: "failed", agentError: "多次重规划仍未达成一致，任务中止。请人工核对状态。" });
-        audit("failed");
+        failTask("多次重规划仍未达成一致，任务中止。请人工核对状态。");
         return;
       }
     }
 
     // =====================================================================
-    // Completion gate — a claim of success needs ASSERTION EVIDENCE
+    // Completion gate — a claim of success needs ACCEPTANCE EVIDENCE
     // =====================================================================
-    if (assertCount === 0) {
+    // Skipped steps must never disappear silently: a step whose dependency
+    // could not be satisfied never ran, and the user has to know that.
+    if (skippedIds.size > 0) {
       set({
-        agentStatus: "failed",
-        agentError: "计划中没有可校验的验证步骤，无法确认目标是否达成，任务中止。请人工核对。",
+        agentNotice: `有 ${skippedIds.size} 个计划步骤因依赖无法满足而未执行（步骤 ${[...skippedIds].join(
+          "、",
+        )}），请核对计划。`,
       });
-      audit("failed");
+    }
+    if (assertCount === 0) {
+      failTask(
+        "计划中没有可校验的验证步骤，无法确认目标是否达成，任务中止。请人工核对。",
+      );
       return;
     }
     if (verifiedCount === 0) {
-      set({
-        agentStatus: "failed",
-        agentError: "所有验证步骤的断言均未通过，无法确认目标已达成，任务中止。请人工核对。",
-      });
-      audit("failed");
+      failTask(
+        "所有验证步骤的断言均未通过，无法确认目标已达成，任务中止。请人工核对。",
+      );
+      return;
+    }
+    if (!acceptanceOk()) {
+      const missing = acceptanceIds.filter((id) => !passedAcceptance.has(id));
+      failTask(
+        `验收步骤未全部通过（${acceptanceIds.length - missing.length}/${
+          acceptanceIds.length
+        } 通过），无法确认目标已达成，任务中止。请人工核对。`,
+      );
       return;
     }
     set({ agentStatus: "done" });
@@ -1130,8 +1339,13 @@ export const useStore = create<Store>((set, get) => ({
   },
   stopAgent: () => {
     const resolve = get()._agentResolve;
+    const sessionId = get().sessionId;
     set({ agentStatus: "stopped", agentApproval: null, _agentResolve: null });
     resolve?.(false);
+    // Cancel the in-flight remote command. Without this the command keeps
+    // running on the server long after the user pressed "停止" — the UI said
+    // "stopped" while the machine was still busy executing the agent's step.
+    if (sessionId !== null) void ipc.agentCancel(sessionId).catch(() => {});
     const st = get();
     if (st.agentSteps.length > 0) void ipc.saveAgentLog(st.agentGoal, "stopped", st.agentSteps);
   },

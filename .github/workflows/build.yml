@@ -46,9 +46,24 @@ jobs:
       - run: |
           cargo audit --file src-tauri/Cargo.lock || true
 
+  web-test:
+    name: frontend type check + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Type check
+        run: npx tsc --noEmit
+      - name: Unit tests (agent policy rules)
+        run: npm test
+
   build:
     name: build (${{ matrix.os }})
-    needs: test
+    needs: [test, web-test]
     strategy:
       fail-fast: false
       matrix:

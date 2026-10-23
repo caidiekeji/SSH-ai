@@ -127,8 +127,13 @@ export const ipc = {
     }),
 
   /** Planner: ONE model call produces the whole ordered plan. */
-  agentPlan: (sessionId: number, goal: string, profileId?: string | null) =>
-    invoke<AgentPlan>("agent_plan", { sessionId, goal, profileId: profileId ?? null }),
+  agentPlan: (sessionId: number, goal: string, profileId?: string | null, agentCwd?: string | null) =>
+    invoke<AgentPlan>("agent_plan", {
+      sessionId,
+      goal,
+      profileId: profileId ?? null,
+      agentCwd: agentCwd ?? null,
+    }),
 
   /** Verifier: Rust decides whether a step's assertions passed. */
   agentVerify: (expect: ExpectSpec, exitCode: number | null, output: string) =>

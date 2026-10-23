@@ -352,7 +352,10 @@ pub const AGENT_SYSTEM_PROMPT: &str = r#"你是服务器自动化运维 Agent。
 11. 断言失败时先读「断言失败原因」，再决定下一步：
    - 若原因说"断言写成了自然语言描述"→ 改断言（换成结构化 expect），不要换命令；
    - 若原因说"命令没有任何输出"→ 只断言 exit_code，不要换命令；
-   - 若原因说"输出中未找到预期内容"→ 才是输出与预期不符，换读命令或换字面子串。"#;
+   - 若原因说"输出中未找到预期内容"→ 才是输出与预期不符，换读命令或换字面子串。
+12. 当被要求验证时，你的 verify 必须直接检验「运维目标本身」，不能拿"命令跑成功了"
+   （exit_code=0）冒充验收证据：目标若是"确认已安装应用"，断言必须落在应用清单的
+   内容上（例如 contains:["nginx"]），而不是只断言查询命令退出码为 0。"#;
 
 // ---------------------------------------------------------------------------
 // Agent mode · PLANNER: one model call produces the whole ordered plan.
@@ -364,7 +367,7 @@ pub const AGENT_PLAN_PROMPT: &str = r#"你是服务器自动化运维 Agent 的�
 
 你必须只返回一个 JSON 对象（禁止 Markdown 代码块、禁止附加解释文字）：
 {"steps":[
-  {"id":1,"intent":"≤40字这一步做什么","command":"单行可执行命令","expect":{"exit_code":0,"contains":["关键子串"],"not_contains":["不应出现的子串"],"regex":null},"risk_hint":"read|write|destructive","depends_on":[]}
+  {"id":1,"intent":"≤40字这一步做什么","command":"单行可执行命令","expect":{"exit_code":0,"contains":["关键子串"],"not_contains":["不应出现的子串"],"regex":null},"risk_hint":"read|write|destructive","depends_on":[],"required":true}
 ]}
 
 规则：
@@ -379,7 +382,14 @@ pub const AGENT_PLAN_PROMPT: &str = r#"你是服务器自动化运维 Agent 的�
 5. 需要前一步结果的步骤用 depends_on 标注前一步的 id。
 6. 命令必须幂等优先；不可逆操作（rm -rf、覆盖配置）尽量避免，必须写时先给出可回滚的备份步骤。
 7. 只读探测优先（ls/cat/grep/systemctl status/journalctl），不要一上来就改系统。
-8. 不要输出 pty 步骤：交互式程序请改用非交互等价命令或先做只读探测。"#;
+8. 不要输出 pty 步骤：交互式程序请改用非交互等价命令或先做只读探测。
+9. 必须有且只有真正检验「运维目标本身」的那一步标 required=true，其余步骤标 false。
+   任务判定完成的唯一依据就是：所有 required 步骤的断言全部通过。因此：
+   - required 步骤不能只是"命令跑成功了"（例如只写 exit_code=0）；
+   - 目标若是"确认已安装应用"，required 步骤的断言必须落在应用清单的**内容**上
+     （例如 contains:["nginx"] 或正则匹配到具体包名）；
+   - 若目标本身无法用字面子串校验，就用能反映目标的最强断言（regex / not_contains），
+     宁可让这一条失败，也不要用一个必然通过的空断言冒充验收。"#;
 
 /// One planned agent step (pure data; execution happens elsewhere).
 /// action: "command" | "verify" | "done" | "giveup" | "pty"

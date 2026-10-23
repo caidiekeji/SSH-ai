@@ -65,6 +65,15 @@ pub struct PlanStep {
     /// Ids of steps that must run before this one.
     #[serde(default)]
     pub depends_on: Vec<u32>,
+    /// Whether this step is an ACCEPTANCE CRITERION.
+    ///
+    /// "The task is done" requires every `required` step's assertions to
+    /// pass. A step that merely succeeded is NOT proof that the goal was
+    /// achieved — `exit_code = 0` on a probe only proves the probe ran.
+    /// Steps the planner marks as `required` must therefore assert on the
+    /// goal itself (e.g. the package listing actually contains the package).
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// A whole plan.
@@ -253,6 +262,13 @@ pub fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
                     .collect::<Vec<u32>>()
             })
             .unwrap_or_default();
+        // Acceptance criterion: the model marks it explicitly. A plan with no
+        // `required` step is still usable — the executor falls back to the
+        // last assertive step — but a plan WITH one is strictly stronger.
+        let required = item
+            .get("required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         steps.push(PlanStep {
             id,
             intent,
@@ -260,6 +276,7 @@ pub fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
             expect: parse_expect(item.get("expect")),
             risk_hint,
             depends_on,
+            required,
         });
     }
 
@@ -488,6 +505,19 @@ mod tests {
         let raw = format!("[{}]", items.join(","));
         let plan = parse_plan(&raw).unwrap();
         assert_eq!(plan.steps.len(), MAX_PLAN_STEPS);
+    }
+
+    #[test]
+    fn plan_parses_required_flag() {
+        // `required` marks the ACCEPTANCE CRITERION: "task done" requires
+        // every required step's assertions to pass.
+        let raw = r#"{"steps":[
+            {"id":1,"command":"cat /etc/os-release","expect":{"exit_code":0}},
+            {"id":2,"command":"dpkg -l nginx","expect":{"exit_code":0,"contains":["nginx"]},"required":true}
+        ]}"#;
+        let plan = parse_plan(raw).unwrap();
+        assert!(!plan.steps[0].required, "absent → false");
+        assert!(plan.steps[1].required, "explicit true → true");
     }
 
     #[test]

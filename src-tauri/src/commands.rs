@@ -1065,7 +1065,7 @@ pub fn execution_gate(state: &AppState, command: &str, ack: &str) -> Result<(), 
     let approved = ack == "approved";
     match assessment.level {
         RiskLevel::Red => Err(format!(
-            "已拒绝执行：命中黑名单规则「{}」——{}。该命令风险过高，Agent 不予执行；如确需执行请在终端中手动输入。",
+            "已拒绝执行：命中黑名单规则「{}」——{}。该命令风险过高，Agent 不会执行；如确需执行请在可见终端中手动输入。",
             assessment.rule, assessment.reason
         )),
         RiskLevel::Yellow if !approved => Err(format!(
@@ -1321,6 +1321,11 @@ pub async fn agent_plan(
     session_id: u64,
     goal: String,
     profile_id: Option<String>,
+    // The agent shell's LIVE cwd. The connect-time probe ran in the user's
+    // PTY channel and never saw the agent's own `cd`, so a plan produced
+    // against the stale value could put relative-path commands in the wrong
+    // directory.
+    agent_cwd: Option<String>,
 ) -> Result<crate::agent_plan::AgentPlan, String> {
     let (profile, key) = {
         let profiles = state.profiles.lock().unwrap_or_else(|e| e.into_inner());
@@ -1354,6 +1359,13 @@ pub async fn agent_plan(
         (p.system_info.clone(), tail)
     };
     let sys_text = crate::pipeline::context::format_system_context(&sys_info);
+    // Override the stale probed CWD with the agent shell's live one — the
+    // planner must ground relative paths in the same directory the executor
+    // will use.
+    let sys_text = match agent_cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(cwd) => format!("{sys_text}CWD(Agent执行通道): {cwd}\n"),
+        None => sys_text,
+    };
     let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
     run_agent_plan(
         adapter.as_ref(),

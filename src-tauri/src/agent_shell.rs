@@ -167,6 +167,24 @@ fn find_sentinel(buf: &[u8]) -> Option<(i32, Option<String>, usize)> {
     None
 }
 
+/// Is the command's fate UNKNOWN — i.e. did it maybe run remotely while we
+/// were not watching?
+///
+/// This is the flag that makes the caller ABORT instead of retrying, so it
+/// must be precise:
+///
+/// * the bytes were handed over (`written`) — otherwise nothing ran;
+/// * no exit code came back (`exit_code.is_none()`) — otherwise we know how
+///   it ended;
+/// * it was NOT a timeout — a timeout means *we* stopped waiting, which is
+///   a different situation. Conflating the two made every timed-out
+///   READ-ONLY command abort the whole agent task with a scary
+///   "可能已执行" message, while a write command that timed out (and may
+///   still be running) must still abort.
+pub fn is_ambiguous_execution(written: bool, exit_code: Option<i32>, timed_out: bool) -> bool {
+    written && exit_code.is_none() && !timed_out
+}
+
 /// Take ownership of a freshly opened `shell` channel and drive it from a
 /// dedicated task. Generic over the channel payload so this module never
 /// names client/server handle types.
@@ -284,7 +302,16 @@ where
                 .to_string();
             // The command may have run even though we never saw its exit code:
             // the caller must not replay it.
-            let maybe_executed = written && exit_code.is_none();
+            //
+            // A TIMEOUT is a DIFFERENT case: we simply stopped waiting, so the
+            // command's fate is still unknown — but the caller must be able
+            // to tell the two apart. Conflating them made every timed-out
+            // READ-ONLY command abort the whole agent task with a scary
+            // "可能已执行" message. Timeouts travel through `timed_out`; this
+            // flag is reserved for "the channel died after the bytes were
+            // handed over", where replaying a write command is genuinely
+            // unsafe.
+            let maybe_executed = is_ambiguous_execution(written, exit_code, timed_out);
             let _ = resp.send(ShellResp {
                 output,
                 exit_code,
@@ -555,5 +582,33 @@ mod tests {
         let w = wrap_command("echo hi");
         assert!(!w.contains('\u{1}'));
         assert!(w.contains("\\001"));
+    }
+
+    // ---- regression: a timeout is NOT an ambiguous execution --------------
+
+    #[test]
+    fn timeout_is_not_ambiguous_execution() {
+        // The bytes were handed over and no exit code came back — but we
+        // stopped waiting on PURPOSE. A read-only command that timed out may
+        // be run again; aborting the whole task here (as the old code did)
+        // turned every slow read into a fatal "可能已执行" incident.
+        assert!(!is_ambiguous_execution(true, None, true));
+    }
+
+    #[test]
+    fn channel_death_after_write_is_ambiguous_execution() {
+        // The real ambiguous case: the channel died after the bytes were
+        // handed over, so the command MAY have run. Replaying a write
+        // command would run it twice.
+        assert!(is_ambiguous_execution(true, None, false));
+    }
+
+    #[test]
+    fn known_outcome_is_never_ambiguous() {
+        // We know how it ended → nothing is ambiguous.
+        assert!(!is_ambiguous_execution(true, Some(0), false));
+        assert!(!is_ambiguous_execution(true, Some(1), false));
+        // Nothing was ever written → nothing ran.
+        assert!(!is_ambiguous_execution(false, None, false));
     }
 }

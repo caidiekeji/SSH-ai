@@ -430,6 +430,7 @@ function AgentCard() {
   const error = useStore((s) => s.agentError);
   const plan = useStore((s) => s.agentPlan);
   const memory = useStore((s) => s.agentMemory);
+  const notice = useStore((s) => s.agentNotice);
   const [planOpen, setPlanOpen] = useState(false);
   if (status === "idle") return null;
 
@@ -452,6 +453,7 @@ function AgentCard() {
       agentError: "",
       agentApproval: null,
       agentPlan: null,
+      agentNotice: "",
       agentMemory: { cwd: "", facts: [], hypotheses: [], failedAttempts: [] },
     });
 
@@ -498,7 +500,14 @@ function AgentCard() {
               <ol className="agent-plan-list">
                 {plan.steps.map((s, i) => (
                   <li key={s.id ?? i} className={steps.some((d) => d.no === i + 1) ? "done" : ""}>
-                    <span className="agent-plan-intent">{s.intent || "（未说明意图）"}</span>
+                    <span className="agent-plan-intent">
+                      {s.intent || "（未说明意图）"}
+                      {s.required && (
+                        <span className="agent-plan-required" title="验收步骤：只有它的断言通过才算任务完成">
+                          验收
+                        </span>
+                      )}
+                    </span>
                     <code className="agent-plan-cmd">{s.command}</code>
                     {s.expect && (
                       <span className="agent-plan-expect">
@@ -585,11 +594,12 @@ function AgentCard() {
             </div>
           </div>
         )}
-        {status === "done" && steps.length >= 0 && (
+        {status === "done" && (
           <div className="agent-note ok">
             任务完成（{steps.filter((s) => s.verified === true).length} 项断言通过验证）
           </div>
         )}
+        {notice && <div className="agent-note">{notice}</div>}
         {error && status !== "running" && status !== "waiting" && <div className="agent-note err">{error}</div>}
       </div>
     </div>

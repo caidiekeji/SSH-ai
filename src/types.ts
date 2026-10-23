@@ -153,6 +153,12 @@ export interface PlanStep {
   expect: ExpectSpec;
   riskHint: string;
   dependsOn: number[];
+  /**
+   * Acceptance criterion. "Task done" requires EVERY required step's
+   * assertions to pass — a step that merely succeeded is not proof that the
+   * goal was achieved.
+   */
+  required?: boolean;
 }
 
 export interface AgentPlan {
