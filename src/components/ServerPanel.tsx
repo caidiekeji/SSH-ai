@@ -21,6 +21,7 @@ export function ServerPanel() {
   const connStatus = useStore((s) => s.connStatus);
   const connError = useStore((s) => s.connError);
   const sessionId = useStore((s) => s.sessionId);
+  const tabs = useStore((s) => s.tabs);
   const activeHost = useStore((s) => s.activeHost);
   const serverInfo = useStore((s) => s.serverInfo);
   const serverError = useStore((s) => s.serverError);
@@ -48,6 +49,11 @@ export function ServerPanel() {
   // Text-input dialog state (WebView2 does NOT support window.prompt —
   // a custom modal is required for mkdir / rename name entry).
   const [ask, setAsk] = useState<{ title: string; label: string; value: string; onOk: (v: string) => void } | null>(null);
+  // Per-host connection state. Establishing a SECOND session must never
+  // disturb the tab the user is currently working in, so this is tracked
+  // per host instead of through the global `connStatus`.
+  const [pendingHosts, setPendingHosts] = useState<Record<string, boolean>>({});
+  const [hostErrs, setHostErrs] = useState<Record<string, string>>({});
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -70,9 +76,41 @@ export function ServerPanel() {
     };
   }, [connStatus, sessionId]);
 
-  const connect = async (conn: ConnectionConfig) => {
+  /**
+   * Open (or focus) a session for a saved host.
+   *
+   * The app is multi-session by design: every connection gets its own
+   * session id in the backend and its own tab in the terminal pane. Clicking
+   * a host therefore NEVER replaces the current session — it either focuses
+   * the tab that already holds that host, or opens a new one.
+   *
+   * `force` opens an ADDITIONAL session to the same host (a legit ops need:
+   * a second account / a second shell), instead of focusing the existing tab.
+   */
+  const openHost = async (conn: ConnectionConfig, force = false) => {
     const st = useStore.getState();
-    st.setConn({ connStatus: "connecting", connError: "", activeHost: `${conn.host}:${conn.port}` });
+    const addr = `${conn.host}:${conn.port}`;
+
+    if (!force) {
+      // Focus the live tab for this host. A tab whose session already died
+      // is skipped — clicking the host should establish a FRESH session
+      // instead of revealing a dead terminal.
+      const open = st.tabs.find((t) => t.host === addr && t.status === "connected");
+      if (open) {
+        st.switchTab(open.sessionId);
+        return;
+      }
+    }
+
+    // Only claim the GLOBAL status when no session is active yet — otherwise
+    // the tab the user is working in would flip to "connecting" while a
+    // second host is being established.
+    const hasActive = st.activeTabId != null;
+    if (!hasActive) {
+      st.setConn({ connStatus: "connecting", connError: "", activeHost: addr });
+    }
+    setPendingHosts((p) => ({ ...p, [conn.id]: true }));
+    setHostErrs((e) => ({ ...e, [conn.id]: "" }));
     try {
       const has = await ipc.hasSavedPassword(conn.id).catch(() => false);
       const res = await ipc.sshConnect({
@@ -89,7 +127,7 @@ export function ServerPanel() {
       st.openTab(
         res.sessionId,
         conn.name,
-        `${conn.host}:${conn.port}`,
+        addr,
         has
           ? {
               host: conn.host,
@@ -105,13 +143,39 @@ export function ServerPanel() {
           : undefined,
       );
     } catch (e) {
-      st.setConn({ connStatus: "error", connError: String(e) });
+      const msg = String(e);
+      if (useStore.getState().activeTabId == null) {
+        st.setConn({ connStatus: "error", connError: msg });
+      } else {
+        // Keep the active session's status untouched; report next to the host.
+        setHostErrs((prev) => ({ ...prev, [conn.id]: msg }));
+      }
+    } finally {
+      setPendingHosts((p) => {
+        const n = { ...p };
+        delete n[conn.id];
+        return n;
+      });
     }
   };
 
   const quickConnect = async () => {
     const st = useStore.getState();
-    st.setConn({ connStatus: "connecting", connError: "", activeHost: `${form.host}:${form.port}` });
+    const addr = `${form.host}:${Number(form.port)}`;
+    // The host may already be open in a live tab — focus it instead of
+    // opening a duplicate session.
+    const open = st.tabs.find((t) => t.host === addr && t.status === "connected");
+    if (open) {
+      st.switchTab(open.sessionId);
+      setShowAdd(false);
+      setErr("");
+      return;
+    }
+    // Same rule as openHost: only claim the global status when nothing is
+    // connected yet.
+    if (st.activeTabId == null) {
+      st.setConn({ connStatus: "connecting", connError: "", activeHost: addr });
+    }
     try {
       const res = await ipc.sshConnect({
         host: form.host,
@@ -126,12 +190,14 @@ export function ServerPanel() {
       const conn = connFromForm(form, `conn-${Date.now()}`);
       await ipc.saveConnection(conn, form.password || null);
       await loadConnections();
-      st.openTab(res.sessionId, conn.name, `${form.host}:${form.port}`);
+      st.openTab(res.sessionId, conn.name, addr);
       setShowAdd(false);
       setErr("");
     } catch (e) {
       setErr(String(e));
-      st.setConn({ connStatus: "error", connError: String(e) });
+      if (useStore.getState().activeTabId == null) {
+        st.setConn({ connStatus: "error", connError: String(e) });
+      }
     }
   };
 
@@ -309,18 +375,41 @@ export function ServerPanel() {
       {/* ---- hosts ---- */}
       <h3>主机</h3>
       {connections.map((c) => {
-        const isActive = connected && activeHost?.startsWith(`${c.host}:`);
+        const addr = `${c.host}:${c.port}`;
+        const isActive = connected && activeHost === addr;
+        const tabOf = tabs.find((t) => t.host === addr);
+        const hasLive = tabOf?.status === "connected";
+        const pending = !!pendingHosts[c.id];
         return (
-          <div key={c.id} className={`host-item ${isActive ? "active" : ""}`} onClick={() => !connected && connect(c)}>
+          <div
+            key={c.id}
+            className={`host-item ${isActive ? "active" : ""} ${pending ? "pending" : ""}`}
+            onClick={() => !pending && void openHost(c)}
+            title={hasLive ? "已打开标签页，点击切换到该会话" : "点击连接并打开新标签页"}
+          >
             <div className="host-line">
-              <span className={`host-dot ${isActive ? "on" : ""}`} />
+              <span className={`host-dot ${isActive ? "on" : ""} ${pending ? "spin" : ""}`} />
               <div className="host-meta">
                 <div className="host-name">{c.name}</div>
                 <div className="host-addr">
                   {c.username}@{c.host}
                 </div>
               </div>
+              {tabOf && !pending && (
+                <button
+                  className="host-dup"
+                  title="在同一主机上再开一个会话"
+                  aria-label={`在 ${c.name} 上新建会话`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void openHost(c, true);
+                  }}
+                >
+                  <Icon name="plus" size={11} />
+                </button>
+              )}
             </div>
+            {hostErrs[c.id] && <div className="error-text small-err host-err">{hostErrs[c.id]}</div>}
           </div>
         );
       })}
@@ -329,7 +418,7 @@ export function ServerPanel() {
       </button>
       {connected && (
         <button className="small host-add disconnect" onClick={disconnect}>
-          断开当前连接
+          关闭当前会话{tabs.length > 1 ? `（共 ${tabs.length} 个）` : ""}
         </button>
       )}
       {connStatus === "error" && <div className="error-text small-err">{connError}</div>}
