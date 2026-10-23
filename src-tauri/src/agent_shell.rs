@@ -115,9 +115,13 @@ pub fn wrap_command(command: &str) -> String {
 /// truncating at a half-arrived frame would lose the cwd. So the scan only
 /// accepts a head whose ENTIRE frame (code + cwd) is already buffered.
 ///
-/// Returns `(exit_code, cwd, cut_pos)` where `cut_pos` is the byte offset
-/// just past the frame. Byte-wise scan so a sentinel split across two SSH
-/// data frames still parses.
+/// Returns `(exit_code, cwd, frame_start)` where `frame_start` is the byte
+/// offset at which the frame BEGINS. The caller truncates the buffer THERE,
+/// so the protocol frame never reaches the command payload — leaving it in
+/// corrupts `contains` / `regex` assertions (the payload
+/// "3\n\x01AISA_RC:0\x02…" fails the regex /^[0-9]+$/, because Rust's `$` is
+/// end-of-text unless the `(?m)` flag is set).
+/// Byte-wise scan so a sentinel split across two SSH data frames still parses.
 fn find_sentinel(buf: &[u8]) -> Option<(i32, Option<String>, usize)> {
     let mut search_from = buf.len();
     while let Some(start) = buf[..search_from]
@@ -160,8 +164,9 @@ fn find_sentinel(buf: &[u8]) -> Option<(i32, Option<String>, usize)> {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let cut = start + SENTINEL_HEAD.len() + code_end + 1 + PWD_HEAD.len() + pwd_end + 1;
-        return Some((code, cwd, cut));
+        // Report where the frame STARTS, not where it ends: the caller
+        // truncates there so the frame is stripped from the payload.
+        return Some((code, cwd, start));
     }
     None
 }
@@ -249,8 +254,12 @@ where
                                     let tail = out.split_off(out.len() - MAX_OUT);
                                     out = tail;
                                 }
-                                if let Some((code, cwd, cut)) = find_sentinel(&out) {
-                                    out.truncate(cut);
+                                if let Some((code, cwd, frame_start)) = find_sentinel(&out) {
+                                    // Strip the protocol frame: everything
+                                    // from the frame's first byte onwards is
+                                    // metadata, not command output. Leaving it
+                                    // in the payload corrupts the assertions.
+                                    out.truncate(frame_start);
                                     exit_code = Some(code);
                                     if let Some(c) = cwd {
                                         last_cwd = Some(c);
@@ -381,25 +390,20 @@ mod tests {
     #[test]
     fn sentinel_roundtrip() {
         let buf = b"some output\n\x01AISA_RC:0\x02\x01AISA_PWD:/root\x02\n";
-        let (code, cwd, cut) = find_sentinel(buf).expect("sentinel found");
+        let (code, cwd, frame_start) = find_sentinel(buf).expect("sentinel found");
         assert_eq!(code, 0);
         assert_eq!(cwd.as_deref(), Some("/root"));
-        assert_eq!(
-            &buf[..cut],
-            b"some output\n\x01AISA_RC:0\x02\x01AISA_PWD:/root\x02"
-        );
+        // The frame starts right after the command output.
+        assert_eq!(&buf[..frame_start], b"some output\n");
     }
 
     #[test]
     fn sentinel_with_cwd() {
         let buf = b"out\n\x01AISA_RC:0\x02\x01AISA_PWD:/var/log\x02\n";
-        let (code, cwd, cut) = find_sentinel(buf).expect("sentinel found");
+        let (code, cwd, frame_start) = find_sentinel(buf).expect("sentinel found");
         assert_eq!(code, 0);
         assert_eq!(cwd.as_deref(), Some("/var/log"));
-        assert_eq!(
-            &buf[..cut],
-            b"out\n\x01AISA_RC:0\x02\x01AISA_PWD:/var/log\x02"
-        );
+        assert_eq!(&buf[..frame_start], b"out\n");
     }
 
     #[test]
@@ -428,10 +432,48 @@ mod tests {
         acc.extend_from_slice(b"out\n\x01AIS");
         assert!(find_sentinel(&acc).is_none());
         acc.extend_from_slice(b"A_RC:3\x02\x01AISA_PWD:/etc\x02\n");
-        let (code, cwd, cut) = find_sentinel(&acc).expect("after tail");
+        let (code, cwd, frame_start) = find_sentinel(&acc).expect("after tail");
         assert_eq!(code, 3);
         assert_eq!(cwd.as_deref(), Some("/etc"));
-        assert_eq!(&acc[..cut], b"out\n\x01AISA_RC:3\x02\x01AISA_PWD:/etc\x02");
+        assert_eq!(&acc[..frame_start], b"out\n");
+    }
+
+    #[test]
+    fn payload_never_contains_the_sentinel_frame() {
+        // Regression (user-visible): the reply frame is PROTOCOL metadata and
+        // must never reach the command payload. Leaving it in corrupted the
+        // assertions — the payload "3\n\x01AISA_RC:0\x02\x01AISA_PWD:/h\x02"
+        // fails the regex /^[0-9]+$/ (Rust's `$` is end-of-text without the
+        // `(?m)` flag) and "输出包含 docker" failed for the same reason.
+        let buf = b"3\n\x01AISA_RC:0\x02\x01AISA_PWD:/home/jie\x02\n";
+        let (code, cwd, frame_start) = find_sentinel(buf).expect("sentinel found");
+        assert_eq!(code, 0);
+        assert_eq!(cwd.as_deref(), Some("/home/jie"));
+        let payload = &buf[..frame_start];
+        assert_eq!(payload, b"3\n");
+        // No protocol bytes survive into the payload.
+        assert!(!payload.windows(SENTINEL_HEAD.len()).any(|w| w == SENTINEL_HEAD));
+        assert!(!payload.windows(PWD_HEAD.len()).any(|w| w == PWD_HEAD));
+    }
+
+    #[test]
+    fn clean_payload_satisfies_numeric_regex_assertion() {
+        // The exact shape of the reported failure: after the frame is
+        // stripped, "3" must satisfy the plan assertion /^[0-9]+$/, while the
+        // old (polluted) payload must NOT.
+        use regex::Regex;
+        let buf = b"3\n\x01AISA_RC:0\x02\x01AISA_PWD:/home/jie\x02\n";
+        let (_, _, frame_start) = find_sentinel(buf).expect("sentinel found");
+        let payload = String::from_utf8_lossy(&buf[..frame_start])
+            .trim_matches('\n')
+            .to_string();
+        assert_eq!(payload, "3");
+        let re = Regex::new(r"^[0-9]+$").expect("valid regex");
+        assert!(re.is_match(&payload), "clean payload must match");
+        // The polluted payload (old behaviour) must fail — this is exactly
+        // the regression this test guards.
+        let polluted = String::from_utf8_lossy(buf).trim_matches('\n').to_string();
+        assert!(!re.is_match(&polluted), "polluted payload must not match");
     }
 
     #[test]

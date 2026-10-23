@@ -808,7 +808,12 @@ export const useStore = create<Store>((set, get) => ({
       if (!alive()) return { ok: false, verified: undefined };
 
       // --- Executor: run it on the persistent shell --------------------------
+      // `rawOutput` is the command's own output; `output` additionally carries
+      // the annotations that explain a non-zero exit / timeout to the MODEL.
+      // The Verifier must judge the RAW payload — annotations are guidance,
+      // not command output, and would corrupt `contains` / `regex` assertions.
       let output = "";
+      let rawOutput = "";
       let exitCode: number | null = null;
       let maybeExecuted = false;
       try {
@@ -816,10 +821,12 @@ export const useStore = create<Store>((set, get) => ({
           // Interactive terminal step: the user watches the PTY, so we read the
           // local screen model afterwards instead of a structured result.
           await ipc.agentPtyWrite(sessionId, action.command, "approved");
-          output = await ipc.readScreenTail(sessionId, 30).catch(() => "");
+          rawOutput = await ipc.readScreenTail(sessionId, 30).catch(() => "");
+          output = rawOutput;
           if (!output.trim()) output = "（已写入终端，未捕获到可见输出）";
         } else {
           const resp = await ipc.agentExec(sessionId, action.command, execTimeout, "approved");
+          rawOutput = resp.output;
           output = resp.output;
           exitCode = resp.exitCode;
           maybeExecuted = resp.maybeExecuted;
@@ -876,7 +883,9 @@ export const useStore = create<Store>((set, get) => ({
       if (hasExpect && expect) {
         assertCount += 1;
         try {
-          const outcome = await ipc.agentVerify(expect, exitCode, output);
+          // Assert against the RAW payload — never against the annotated
+          // copy (the annotations are notes for the model, not output).
+          const outcome = await ipc.agentVerify(expect, exitCode, rawOutput);
           verified = outcome.passed;
           verifyFailures = outcome.failures;
         } catch (e) {
