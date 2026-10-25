@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,16 +108,48 @@ pub struct AppState {
     pub app: tauri::AppHandle,
     pub data_dir: PathBuf,
     pub known_hosts_path: PathBuf,
-    pub sessions: Mutex<HashMap<u64, Session>>,
-    next_session_id: AtomicU64,
-    pub profiles: Mutex<Vec<ProviderProfile>>,
-    pub connections: Mutex<Vec<ConnectionConfig>>,
+    /// Sessions, keyed by id.
+    ///
+    /// `Arc`-wrapped so the whole state can be CLONED and handed to a
+    /// background task: the Agent controller lives in a spawned task that
+    /// must own its state for `'static` (a task cannot borrow from the
+    /// command that started it). Cloning the `Arc`s shares the same
+    /// underlying data — the controller sees the same sessions as the UI.
+    pub sessions: Arc<Mutex<HashMap<u64, Session>>>,
+    /// Session id counter — `Arc`-wrapped so a CLONE of the state keeps
+    /// handing out fresh ids instead of duplicating the original's counter.
+    next_session_id: Arc<AtomicU64>,
+    pub profiles: Arc<Mutex<Vec<ProviderProfile>>>,
+    pub connections: Arc<Mutex<Vec<ConnectionConfig>>>,
     pub whitelist_file: PathBuf,
-    pub risk: RiskEngine,
+    pub risk: Arc<RiskEngine>,
     /// Pending TOFU decision: the russh handler parks here while the UI asks
     /// the user to trust an unknown host key. Resolved by host_key_respond.
-    pub pending_hostkey: tokio::sync::Mutex<Option<PendingHostKey>>,
-    pub settings: Mutex<AppSettings>,
+    pub pending_hostkey: Arc<tokio::sync::Mutex<Option<PendingHostKey>>>,
+    pub settings: Arc<Mutex<AppSettings>>,
+    /// Live agent runs, keyed by run id.
+    pub agent_runs: Arc<crate::agent_runner::RunRegistry>,
+}
+
+/// The app state can be cloned into a background task: every mutable part is
+/// `Arc`-wrapped, so a clone shares the SAME data with the original.
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            app: self.app.clone(),
+            data_dir: self.data_dir.clone(),
+            known_hosts_path: self.known_hosts_path.clone(),
+            sessions: self.sessions.clone(),
+            next_session_id: self.next_session_id.clone(),
+            profiles: self.profiles.clone(),
+            connections: self.connections.clone(),
+            whitelist_file: self.whitelist_file.clone(),
+            risk: self.risk.clone(),
+            pending_hostkey: self.pending_hostkey.clone(),
+            settings: self.settings.clone(),
+            agent_runs: self.agent_runs.clone(),
+        }
+    }
 }
 
 pub struct PendingHostKey {
@@ -143,14 +175,15 @@ impl AppState {
             app,
             data_dir,
             known_hosts_path,
-            sessions: Mutex::new(HashMap::new()),
-            next_session_id: AtomicU64::new(1),
-            profiles: Mutex::new(profiles),
-            connections: Mutex::new(connections),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            next_session_id: Arc::new(AtomicU64::new(1)),
+            profiles: Arc::new(Mutex::new(profiles)),
+            connections: Arc::new(Mutex::new(connections)),
             whitelist_file,
-            risk,
-            pending_hostkey: tokio::sync::Mutex::new(None),
-            settings: Mutex::new(settings),
+            risk: Arc::new(risk),
+            pending_hostkey: Arc::new(tokio::sync::Mutex::new(None)),
+            settings: Arc::new(Mutex::new(settings)),
+            agent_runs: Arc::new(crate::agent_runner::RunRegistry::new()),
         }
     }
 
@@ -169,7 +202,11 @@ impl AppState {
     }
 
     pub fn save_whitelist(&self) -> Result<(), String> {
-        let wl = self.risk.whitelist.lock().unwrap_or_else(|e| e.into_inner());
+        let wl = self
+            .risk
+            .whitelist
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         save_json(&self.whitelist_file, &*wl)
     }
 
@@ -194,12 +231,26 @@ impl AppState {
     /// 诊断 joined (None when empty). Legacy single prompt is migrated by
     /// the list_prompts command, so this only reads the library.
     pub fn diag_prompt(&self) -> Option<String> {
-        Self::join_prompts(&self.settings.lock().unwrap_or_else(|e| e.into_inner()).prompts, true)
+        Self::join_prompts(
+            &self
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .prompts,
+            true,
+        )
     }
 
     /// Custom prompt for chat mode (same join rule, 对话 flag).
     pub fn chat_prompt(&self) -> Option<String> {
-        Self::join_prompts(&self.settings.lock().unwrap_or_else(|e| e.into_inner()).prompts, false)
+        Self::join_prompts(
+            &self
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .prompts,
+            false,
+        )
     }
 
     /// Custom style directive for Agent mode (joined onto the built-in

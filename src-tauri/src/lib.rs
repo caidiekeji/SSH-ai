@@ -7,6 +7,8 @@
 //! - HC-05: raw PTY bytes are normalized before any LLM sees them.
 
 mod agent_plan;
+mod agent_policy;
+mod agent_runner;
 mod agent_shell;
 mod ai;
 mod commands;
@@ -89,6 +91,7 @@ pub fn run() {
             // SSH
             commands::ssh_connect,
             commands::ssh_disconnect,
+            commands::list_sessions,
             commands::terminal_write,
             commands::terminal_resize,
             // Connections
@@ -142,6 +145,14 @@ pub fn run() {
             commands::agent_verify,
             commands::agent_cancel,
             commands::agent_pty_write,
+            // Agent run control: the controller lives in the BACKEND, so a
+            // window reload no longer kills the task. The frontend starts a
+            // run, answers approvals, stops it, and reads the snapshot.
+            commands::agent_run_start,
+            commands::agent_approve,
+            commands::agent_run_stop,
+            commands::agent_run_snapshot,
+            commands::agent_run_for_session,
             // SFTP (user-initiated file transfer)
             commands::sftp_download,
             commands::sftp_upload_data,

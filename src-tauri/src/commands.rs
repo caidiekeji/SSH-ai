@@ -1,20 +1,21 @@
 //! Tauri IPC commands. Rust owns the final say on security (PRD §10.3):
 //! risk grading, prefill gating, keychain access, known-hosts — all here.
 
+use crate::agent_plan::{verify_expectation, ExpectSpec, VerifyOutcome};
 use crate::ai::{
     parse_response, run_agent_plan, run_agent_step, run_chat, run_diagnosis, AgentStepIn, ChatTurn,
     DiagnosisRequest,
 };
-use crate::agent_plan::{verify_expectation, ExpectSpec, VerifyOutcome};
 use crate::keyring_store as keyring;
 use crate::provider::specs::PROVIDER_SPECS;
 use crate::provider::{make_adapter, ProviderProfile};
 use crate::safety::prefill::{prefill, sanitize_command};
 use crate::safety::risk::RiskLevel;
 use crate::ssh::known_hosts::KnownHosts;
-use crate::ssh::session::{self, SshAuth, SshConnectRequest, PtyCmd};
+use crate::ssh::session::{self, PtyCmd, SshAuth, SshConnectRequest};
 use crate::state::{AppState, ConnectionConfig};
 use serde::Deserialize;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 
 // ---------------------------------------------------------------------------
@@ -42,10 +43,7 @@ pub async fn ssh_connect(
 ) -> Result<serde_json::Value, String> {
     let mut auth = args.auth;
     if args.use_saved_password {
-        let conn_id = args
-            .connection_id
-            .clone()
-            .ok_or("缺少 connection_id")?;
+        let conn_id = args.connection_id.clone().ok_or("缺少 connection_id")?;
         let secret = keyring::get_secret(&ssh_secret_key(&conn_id))?
             .ok_or("该连接未保存密码，请手动输入")?;
         auth = match auth {
@@ -150,7 +148,11 @@ pub async fn terminal_resize(
 
 #[tauri::command]
 pub fn list_connections(state: State<'_, AppState>) -> Vec<ConnectionConfig> {
-    state.connections.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    state
+        .connections
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 #[tauri::command]
@@ -255,7 +257,11 @@ fn profile_key_id(profile_id: &str) -> String {
 
 #[tauri::command]
 pub fn list_profiles(state: State<'_, AppState>) -> Vec<ProviderProfile> {
-    state.profiles.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    state
+        .profiles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 #[tauri::command]
@@ -314,8 +320,16 @@ fn resolve_key(
             return Ok(k.trim().to_string());
         }
     }
-    keyring::get_secret(&profile_key_id(profile_id))?
-        .ok_or_else(|| "API Key 未配置".to_string())
+    keyring::get_secret(&profile_key_id(profile_id))?.ok_or_else(|| "API Key 未配置".to_string())
+}
+
+/// The implementation behind [`resolve_key`].
+///
+/// Split out so the Agent controller can resolve the provider key without
+/// an IPC round trip. The key is read from the OS keychain (HC-02) and is
+/// never persisted.
+pub(crate) fn resolve_key_inner(state: &AppState, profile_id: &str) -> Result<String, String> {
+    resolve_key(state, profile_id, None)
 }
 
 #[tauri::command]
@@ -404,7 +418,15 @@ pub async fn prefill_command(
             .clone()
     };
 
-    match prefill(&state.risk, &write_tx, &args.command, &args.ai_risk_hint, ack).await {
+    match prefill(
+        &state.risk,
+        &write_tx,
+        &args.command,
+        &args.ai_risk_hint,
+        ack,
+    )
+    .await
+    {
         Ok(a) => serde_json::to_value(&a).map_err(|e| e.to_string()),
         Err(e) => Err(serde_json::json!({
             "level": e.level,
@@ -431,7 +453,11 @@ pub fn add_whitelist(state: State<'_, AppState>, command: String) -> Result<(), 
         return Err("命令为空".into());
     }
     {
-        let mut wl = state.risk.whitelist.lock().unwrap_or_else(|e| e.into_inner());
+        let mut wl = state
+            .risk
+            .whitelist
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if !wl.contains(&cmd) {
             wl.push(cmd);
         }
@@ -489,9 +515,12 @@ pub async fn ai_diagnose(
         let mut p = pipeline_arc.lock().await;
         let sealed = p.seal_active();
         for ev in sealed {
-            state.emit("error-block", serde_json::json!({
-                "sessionId": session_id, "block": ev,
-            }));
+            state.emit(
+                "error-block",
+                serde_json::json!({
+                    "sessionId": session_id, "block": ev,
+                }),
+            );
         }
     }
 
@@ -502,13 +531,8 @@ pub async fn ai_diagnose(
     // Default: only the most recent command output. The configurable depth
     // (Settings > AI) lets users include a few previous blocks for context.
     let depth = state.diagnosis_depth() as usize;
-    let target_blocks: Vec<crate::pipeline::pipeline::ErrorBlock> = blocks
-        .iter()
-        .rev()
-        .take(depth)
-        .rev()
-        .cloned()
-        .collect();
+    let target_blocks: Vec<crate::pipeline::pipeline::ErrorBlock> =
+        blocks.iter().rev().take(depth).rev().cloned().collect();
 
     let _ = host; // reserved for per-host context display
     let _ = &sys_info;
@@ -516,8 +540,8 @@ pub async fn ai_diagnose(
     // Guard against concurrent diagnoses per session.
     static DIAG_INFLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
         std::sync::OnceLock::new();
-    let inflight = DIAG_INFLIGHT
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let inflight =
+        DIAG_INFLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
     let inserted = {
         let mut set = inflight.lock().unwrap_or_else(|e| e.into_inner());
         set.insert(session_id)
@@ -566,7 +590,10 @@ pub async fn ai_diagnose(
 
 // ---------------------------------------------------------------------------
 // Agent mode: plan ONE next step. The model returns pure data; execution and
-// risk gating happen in the frontend loop via assess_risk + exec_oneshot.
+// risk gating happen in the BACKEND controller (agent_runner.rs), which owns
+// the whole loop. This command stays as a thin primitive for the MCP server
+// and for debugging — it deliberately contains NO policy logic, so it cannot
+// drift away from the controller's rules.
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
@@ -617,7 +644,11 @@ pub async fn agent_step(
     };
     let sys_text = crate::pipeline::context::format_system_context(&sys_info);
     // Override the stale probed CWD with the agent shell's live one.
-    let sys_text = match agent_cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+    let sys_text = match agent_cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
         Some(cwd) => format!("{sys_text}CWD(Agent执行通道): {cwd}\n"),
         None => sys_text,
     };
@@ -706,7 +737,10 @@ pub fn delete_prompt(state: State<'_, AppState>, id: String) -> Result<(), Strin
 // USER-initiated file transfer only — the AI path never touches these.
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn open_sftp(state: &State<'_, AppState>, session_id: u64) -> Result<russh_sftp::client::SftpSession, String> {
+pub(crate) async fn open_sftp(
+    state: &State<'_, AppState>,
+    session_id: u64,
+) -> Result<russh_sftp::client::SftpSession, String> {
     let handle_cell = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions
@@ -747,13 +781,19 @@ pub async fn sftp_download(
     if meta.is_dir() {
         return Err("目标是一个目录，仅支持下载文件".into());
     }
-    let name = remote_path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("file").to_string();
+    let name = remote_path
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("file")
+        .to_string();
     let local_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("downloads");
-    tokio::fs::create_dir_all(&local_dir).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&local_dir)
+        .await
+        .map_err(|e| e.to_string())?;
     let local_path = local_dir.join(&name);
     let mut out = tokio::fs::File::create(&local_path)
         .await
@@ -803,6 +843,19 @@ pub fn save_agent_log(
     state: State<'_, AppState>,
     goal: String,
     status: String,
+    steps: serde_json::Value,
+) -> Result<String, String> {
+    save_agent_log_inner(&state, &goal, &status, steps)
+}
+
+/// The implementation behind [`save_agent_log`].
+///
+/// Split out so the Agent controller can write its own audit trail — the log
+/// must exist even when the window is closed mid-task.
+pub(crate) fn save_agent_log_inner(
+    state: &AppState,
+    goal: &str,
+    status: &str,
     steps: serde_json::Value,
 ) -> Result<String, String> {
     let dir = state.data_dir.join("agent_logs");
@@ -1089,10 +1142,33 @@ pub async fn exec_oneshot(
     // is re-derived by `execution_gate`; this string is NOT a risk level.
     user_ack: Option<String>,
 ) -> Result<String, String> {
+    exec_oneshot_inner(
+        &state,
+        session_id,
+        &command,
+        timeout_secs,
+        user_ack.as_deref(),
+    )
+    .await
+}
+
+/// The implementation behind [`exec_oneshot`].
+///
+/// Split out so the Agent controller (which lives in the backend) can run a
+/// probe without going through the IPC layer. The controller is a Rust task
+/// in the same process — routing it through `invoke` would be a pointless
+/// round trip through the renderer.
+pub(crate) async fn exec_oneshot_inner(
+    state: &AppState,
+    session_id: u64,
+    command: &str,
+    timeout_secs: Option<u64>,
+    user_ack: Option<&str>,
+) -> Result<String, String> {
     use russh::ChannelMsg;
 
-    let ack = user_ack.as_deref().unwrap_or("none");
-    execution_gate(&state, &command, ack)?;
+    let ack = user_ack.unwrap_or("none");
+    execution_gate(state, command, ack)?;
 
     let timeout = timeout_secs.unwrap_or(15).clamp(5, 300);
     // Clone the Arc'd cell out of the map, then drop the std guard BEFORE
@@ -1113,7 +1189,7 @@ pub async fn exec_oneshot(
             .channel_open_session()
             .await
             .map_err(|e| format!("打开执行通道失败: {e}"))?;
-        ch.exec(true, command.as_str())
+        ch.exec(true, command)
             .await
             .map_err(|e| format!("执行失败: {e}"))?;
         ch
@@ -1194,8 +1270,29 @@ pub async fn agent_exec(
     // "approved" = the user approved THIS command in the confirmation flow.
     user_ack: Option<String>,
 ) -> Result<crate::agent_shell::ShellResp, String> {
-    let ack = user_ack.as_deref().unwrap_or("none");
-    execution_gate(&state, &command, ack)?;
+    agent_exec_inner(
+        &state,
+        session_id,
+        &command,
+        timeout_secs,
+        user_ack.as_deref(),
+    )
+    .await
+}
+
+/// The implementation behind [`agent_exec`].
+///
+/// Split out so the Agent controller can execute a step on the persistent
+/// shell without an IPC round trip.
+pub(crate) async fn agent_exec_inner(
+    state: &AppState,
+    session_id: u64,
+    command: &str,
+    timeout_secs: Option<u64>,
+    user_ack: Option<&str>,
+) -> Result<crate::agent_shell::ShellResp, String> {
+    let ack = user_ack.unwrap_or("none");
+    execution_gate(state, command, ack)?;
     let timeout = timeout_secs.unwrap_or(60).clamp(5, 300);
 
     // Clone the Arc'd cells out of the map, then drop the std guard BEFORE
@@ -1237,7 +1334,7 @@ pub async fn agent_exec(
         if handle
             .tx
             .send(crate::agent_shell::ShellReq::Exec {
-                command: command.clone(),
+                command: command.to_string(),
                 timeout_secs: timeout,
                 resp: rtx,
             })
@@ -1279,6 +1376,13 @@ pub async fn agent_exec(
 /// is poisoned so the next step starts from a fresh, known state.
 #[tauri::command]
 pub async fn agent_cancel(state: State<'_, AppState>, session_id: u64) -> Result<(), String> {
+    agent_cancel_inner(&state, session_id).await
+}
+
+/// The implementation behind [`agent_cancel`].
+///
+/// Split out so the Agent controller can cancel its own in-flight command.
+pub(crate) async fn agent_cancel_inner(state: &AppState, session_id: u64) -> Result<(), String> {
     let shell_slot = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions
@@ -1362,7 +1466,11 @@ pub async fn agent_plan(
     // Override the stale probed CWD with the agent shell's live one — the
     // planner must ground relative paths in the same directory the executor
     // will use.
-    let sys_text = match agent_cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+    let sys_text = match agent_cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
         Some(cwd) => format!("{sys_text}CWD(Agent执行通道): {cwd}\n"),
         None => sys_text,
     };
@@ -1403,7 +1511,20 @@ pub async fn agent_pty_write(
     // "approved" = the user approved THIS exact payload in the dialog.
     user_ack: Option<String>,
 ) -> Result<String, String> {
-    let ack = user_ack.as_deref().unwrap_or("none");
+    agent_pty_write_inner(&state, session_id, &keys, user_ack.as_deref()).await
+}
+
+/// The implementation behind [`agent_pty_write`].
+///
+/// Split out so the Agent controller can drive the user's visible terminal
+/// without an IPC round trip.
+pub(crate) async fn agent_pty_write_inner(
+    state: &AppState,
+    session_id: u64,
+    keys: &str,
+    user_ack: Option<&str>,
+) -> Result<String, String> {
+    let ack = user_ack.unwrap_or("none");
     // Strip ANSI escapes and control characters that could disguise content.
     let cleaned = sanitize_pty_keys(&keys);
     if cleaned.trim().is_empty() {
@@ -1471,7 +1592,20 @@ fn sanitize_pty_keys(keys: &str) -> String {
 /// Read the terminal's latest visible lines (local screen model — NO remote
 /// execution). Used by the agent to observe the PTY the user is watching.
 #[tauri::command]
-pub async fn read_screen_tail(    state: State<'_, AppState>,
+pub async fn read_screen_tail(
+    state: State<'_, AppState>,
+    session_id: u64,
+    lines: Option<usize>,
+) -> Result<String, String> {
+    read_screen_tail_inner(&state, session_id, lines).await
+}
+
+/// The implementation behind [`read_screen_tail`].
+///
+/// Split out so the Agent controller can observe the terminal without an IPC
+/// round trip.
+pub(crate) async fn read_screen_tail_inner(
+    state: &AppState,
     session_id: u64,
     lines: Option<usize>,
 ) -> Result<String, String> {
@@ -1485,12 +1619,245 @@ pub async fn read_screen_tail(    state: State<'_, AppState>,
     let p = pipeline_arc.lock().await;
     let total = p.screen.lines.len();
     let n = lines.unwrap_or(30).clamp(1, 200).min(total);
-    Ok(p
-        .screen
+    Ok(p.screen
         .lines
         .iter()
         .skip(total - n)
         .cloned()
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Agent run control — the controller lives in the BACKEND.
+//
+// These commands are the whole frontend↔backend contract for the agent
+// workflow. The frontend no longer runs the loop: it starts a run, answers
+// approval requests, stops a run, and reads the current snapshot.
+// ---------------------------------------------------------------------------
+
+/// Start an agent task.
+///
+/// The controller runs as a background task in THIS process, so it keeps
+/// going when the window is reloaded — the previous design lost the whole
+/// task on refresh. The returned `run_id` identifies it.
+#[tauri::command]
+pub async fn agent_run_start(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: u64,
+    goal: String,
+    profile_id: Option<String>,
+) -> Result<u64, String> {
+    if goal.trim().is_empty() {
+        return Err("目标不能为空".into());
+    }
+    {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if !sessions.contains_key(&session_id) {
+            return Err("会话不存在".into());
+        }
+    }
+    // A session hosts at most one agent task. Starting a new one cancels the
+    // old one first, so two controllers never fight over the same shell.
+    if let Some(prev) = state.agent_runs.for_session(session_id) {
+        prev.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Unblock a pending approval so the old loop can wind down.
+        if let Some(tx) = prev
+            .approval_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = tx.send(false);
+        }
+        // Drop the old run's handle: a session hosts at most one task, and
+        // the registry must not grow without bound.
+        state.agent_runs.remove_for_session(session_id);
+    }
+
+    let host = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(&session_id)
+            .map(|s| s.host.clone())
+            .unwrap_or_default()
+    };
+
+    let (auto_green, exec_timeout, policy_raw) = {
+        let s = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            s.agent_auto_green,
+            s.agent_exec_timeout.clamp(5, 300),
+            s.agent_policy.clone(),
+        )
+    };
+
+    let run_id = state.agent_runs.allocate_id();
+    let run = Arc::new(crate::agent_runner::AgentRun {
+        run_id,
+        session_id,
+        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        pending: Arc::new(Mutex::new(None)),
+        snapshot: Arc::new(Mutex::new(crate::agent_runner::RunSnapshot {
+            run_id,
+            session_id,
+            goal: goal.clone(),
+            status: crate::agent_runner::RunStatus::Running,
+            plan: None,
+            steps: Vec::new(),
+            memory: crate::agent_runner::AgentMemory::default(),
+            error: String::new(),
+            notice: String::new(),
+            approval: None,
+        })),
+        approval_tx: Arc::new(Mutex::new(None)),
+    });
+    state.agent_runs.insert(run.clone());
+
+    let ctx = crate::agent_runner::RunContext {
+        session_id,
+        goal,
+        host,
+        profile_id,
+        exec_timeout,
+        auto_green,
+        policy: crate::agent_policy::AgentPolicy::from_setting(&policy_raw),
+    };
+
+    // The controller needs an owned AppState to outlive this command. The
+    // state is registered with Tauri, so it can be looked up again inside
+    // the task via the app handle. Cloning is cheap: every mutable part is
+    // `Arc`-wrapped, so the clone shares the same sessions, settings and
+    // risk engine as the original.
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Clone the state BEFORE moving `app_clone` into the controller: the
+        // `State` handle borrows the app handle, so keeping it alive across
+        // the move would be a borrow error.
+        //
+        // `AppState::clone(..)` is written out on purpose: `state.inner()`
+        // yields `&AppState`, and `(&AppState).clone()` would clone the
+        // REFERENCE (not the state) — and that reference would dangle as
+        // soon as the temporary `State` is dropped. An explicit clone gives
+        // an OWNED state; every mutable part is `Arc`-wrapped, so the clone
+        // shares the same sessions, settings and risk engine.
+        let owned_state = AppState::clone(app_clone.state::<AppState>().inner());
+        crate::agent_runner::run_agent_task(app_clone, owned_state, run, ctx).await;
+    });
+
+    Ok(run_id)
+}
+
+/// Answer a pending approval request.
+///
+/// `approved = false` rejects the command: the task stops. `approved = true`
+/// lets the controller continue with the command it was about to run.
+#[tauri::command]
+pub fn agent_approve(
+    state: State<'_, AppState>,
+    run_id: u64,
+    approved: bool,
+) -> Result<(), String> {
+    let run = state
+        .agent_runs
+        .get(run_id)
+        .ok_or("任务不存在或已结束".to_string())?;
+    let tx = run
+        .approval_tx
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .ok_or("当前没有等待确认的操作".to_string())?;
+    // Record the answer so the UI can show it, then wake the controller.
+    {
+        let mut pending = run.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = pending.as_mut() {
+            p.answer = Some(approved);
+        }
+    }
+    tx.send(approved)
+        .map_err(|_| "任务已结束，确认无法送达".to_string())
+}
+
+/// Stop a running agent task.
+///
+/// This cancels the in-flight remote command too — otherwise the machine
+/// would keep executing the agent's step long after the user pressed "停止".
+#[tauri::command]
+pub async fn agent_run_stop(state: State<'_, AppState>, run_id: u64) -> Result<(), String> {
+    let run = state
+        .agent_runs
+        .get(run_id)
+        .ok_or("任务不存在或已结束".to_string())?;
+    run.cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // Unblock a pending approval so the loop can wind down instead of
+    // waiting forever for an answer that will never come.
+    if let Some(tx) = run
+        .approval_tx
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
+        let _ = tx.send(false);
+    }
+    // Cancel the remote command as well.
+    let _ = agent_cancel_inner(&state, run.session_id).await;
+    Ok(())
+}
+
+/// Read the current snapshot of a run.
+///
+/// A reloaded UI calls this to reattach to a task that is still running.
+#[tauri::command]
+pub fn agent_run_snapshot(
+    state: State<'_, AppState>,
+    run_id: u64,
+) -> Result<crate::agent_runner::RunSnapshot, String> {
+    let run = state
+        .agent_runs
+        .get(run_id)
+        .ok_or("任务不存在或已结束".to_string())?;
+    let snap = run.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(snap.clone())
+}
+
+/// The run attached to a session, if any.
+///
+/// A reloaded UI calls this to find the task that survived the reload.
+#[tauri::command]
+pub fn agent_run_for_session(
+    state: State<'_, AppState>,
+    session_id: u64,
+) -> Result<Option<crate::agent_runner::RunSnapshot>, String> {
+    match state.agent_runs.for_session(session_id) {
+        Some(run) => {
+            let snap = run.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(Some(snap.clone()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// List the live SSH sessions.
+///
+/// The session table lives in the BACKEND, so it survives a window reload.
+/// The UI needs it to rebuild its tab strip after a reload — without this,
+/// a reloaded window would not even know which host it was talking to, and
+/// could not reattach to a running agent task.
+#[tauri::command]
+pub fn list_sessions(state: State<'_, AppState>) -> Vec<serde_json::Value> {
+    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    sessions
+        .values()
+        .map(|s| {
+            serde_json::json!({
+                "sessionId": s.id,
+                "host": s.host,
+                "username": s.username,
+            })
+        })
+        .collect()
 }

@@ -1,10 +1,13 @@
 # Frontend
 node_modules/
 dist/
+dist-release/
 
 # Rust
 src-tauri/target/
+src-tauri/gen/
 
 # Local
 *.log
+.push_once.py
 .DS_Store

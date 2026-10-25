@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentPlan,
   AgentPolicy,
+  AgentRunSnapshot,
   AgentStepHistory,
   ConnectionConfig,
   DiagnosisResult,
@@ -27,6 +28,15 @@ export const ipc = {
   }) => invoke<{ sessionId: number }>("ssh_connect", { args }),
 
   sshDisconnect: (sessionId: number) => invoke<void>("ssh_disconnect", { sessionId }),
+
+  /**
+   * List the live SSH sessions held by the backend.
+   *
+   * The session table lives in the backend, so it survives a window reload.
+   * The UI calls this on startup to rebuild its tab strip.
+   */
+  listSessions: () =>
+    invoke<{ sessionId: number; host: string; username: string }[]>("list_sessions"),
 
   terminalWrite: (sessionId: number, bytes: Uint8Array) => {
     let bin = "";
@@ -93,6 +103,37 @@ export const ipc = {
     invoke<string>("ai_chat", { history, question, profileId: profileId ?? null }),
 
   // ---- Agent mode (automated ops loop) ----
+  //
+  // The controller runs in the BACKEND. The frontend never runs the loop:
+  // it starts a run, answers approval requests, stops it, and renders the
+  // snapshot the backend pushes over the `agent-state` event.
+  //
+  // The `agentStep` / `agentPlan` / `agentVerify` commands below are kept
+  // for the MCP server and for debugging; the UI no longer calls them.
+
+  /** Start an agent task in the backend. Returns the run id. */
+  agentRunStart: (sessionId: number, goal: string, profileId?: string | null) =>
+    invoke<number>("agent_run_start", {
+      sessionId,
+      goal,
+      profileId: profileId ?? null,
+    }),
+
+  /** Answer a pending approval request. */
+  agentApprove: (runId: number, approved: boolean) =>
+    invoke<void>("agent_approve", { runId, approved }),
+
+  /** Stop a running agent task (also cancels the in-flight remote command). */
+  agentRunStop: (runId: number) => invoke<void>("agent_run_stop", { runId }),
+
+  /** Read the current snapshot of a run (used to reattach after a reload). */
+  agentRunSnapshot: (runId: number) =>
+    invoke<AgentRunSnapshot>("agent_run_snapshot", { runId }),
+
+  /** The run attached to a session, if any (used to reattach after a reload). */
+  agentRunForSession: (sessionId: number) =>
+    invoke<AgentRunSnapshot | null>("agent_run_for_session", { sessionId }),
+
   /** One step of the reactive loop (fallback / replanning path). */
   agentStep: (
     sessionId: number,

@@ -18,10 +18,23 @@ export function App() {
     loadProviderData();
     const sub = listen<string>("ai-chunk", (ev) => useStore.getState().appendChunk(ev.payload));
     const chatSub = listen<string>("chat-chunk", (ev) => useStore.getState().appendChatChunk(ev.payload));
+    // The agent controller lives in the BACKEND: this subscribes to the
+    // snapshots it pushes. Subscribing at app level (not inside the AI
+    // sidebar) means the task keeps being tracked even when the user
+    // switches the panel away and back.
+    const agentSub = useStore.getState().subscribeAgent();
     return () => {
       sub.then((f) => f());
       chatSub.then((f) => f());
+      agentSub.then((f) => f()).catch(() => {});
     };
+  }, []);
+
+  // Recover the tab strip from the backend's live sessions. This is what
+  // makes a window reload harmless: the SSH sessions (and any running agent
+  // task) live in the backend, so the UI can pick them back up.
+  useEffect(() => {
+    void useStore.getState().restoreSessions();
   }, []);
 
   // Apply the selected color mode to <html data-theme="...">.

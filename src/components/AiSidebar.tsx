@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import { ipc } from "../ipc";
+import { isCardVisible } from "../agentSnapshot";
 import type { DiagnosisCard as Card } from "../types";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
@@ -171,7 +172,7 @@ function Composer() {
         setErr("请先连接主机再启动 Agent");
         return;
       }
-      st.startAgent(t);
+      void st.startAgent(t);
       setText("");
       if (taRef.current) taRef.current.style.height = "64px";
       return;
@@ -431,8 +432,13 @@ function AgentCard() {
   const plan = useStore((s) => s.agentPlan);
   const memory = useStore((s) => s.agentMemory);
   const notice = useStore((s) => s.agentNotice);
+  const runId = useStore((s) => s.agentRunId);
+  const dismissedRunId = useStore((s) => s.agentDismissedRunId);
   const [planOpen, setPlanOpen] = useState(false);
-  if (status === "idle") return null;
+  // The card is hidden only when the user closed THIS run and nothing
+  // requires attention. A pending approval or a finished result always
+  // brings it back.
+  if (status === "idle" || !isCardVisible(status, runId, dismissedRunId)) return null;
 
   const statusText =
     status === "running"
@@ -445,17 +451,12 @@ function AgentCard() {
             ? "失败"
             : "已停止";
 
+  // Closing the card only HIDES it. The run itself lives in the backend, so
+  // the task keeps going and the card comes back on its own when the agent
+  // needs a confirmation or when the task ends. Dismissing the card must
+  // therefore NOT stop the task.
   const closeCard = () =>
-    useStore.setState({
-      agentStatus: "idle",
-      agentSteps: [],
-      agentGoal: "",
-      agentError: "",
-      agentApproval: null,
-      agentPlan: null,
-      agentNotice: "",
-      agentMemory: { cwd: "", facts: [], hypotheses: [], failedAttempts: [] },
-    });
+    useStore.setState({ agentDismissedRunId: useStore.getState().agentRunId });
 
   return (
     <div className="chat-msg">
@@ -466,7 +467,7 @@ function AgentCard() {
           <span className={`agent-status st-${status}`}>{statusText}</span>
           <span className="flex1" />
           {(status === "running" || status === "waiting") && (
-            <button className="mini close" onClick={() => useStore.getState().stopAgent()}>
+            <button className="mini close" onClick={() => void useStore.getState().stopAgent()}>
               停止
             </button>
           )}
@@ -589,8 +590,8 @@ function AgentCard() {
             <code className="agent-appr-cmd">{approval.fullText ?? approval.command}</code>
             {approval.description && <div className="agent-step-desc">{approval.description}</div>}
             <div className="agent-appr-actions">
-              <button className="primary small" onClick={() => useStore.getState().resolveAgent(true)}>批准执行</button>
-              <button className="small" onClick={() => useStore.getState().resolveAgent(false)}>拒绝</button>
+              <button className="primary small" onClick={() => void useStore.getState().resolveAgent(true)}>批准执行</button>
+              <button className="small" onClick={() => void useStore.getState().resolveAgent(false)}>拒绝</button>
             </div>
           </div>
         )}
