@@ -726,6 +726,7 @@ pub async fn run_agent_task(
                 &ctx,
                 &mut plan_approved,
                 &approved_commands,
+                &acceptance_commands,
                 Action {
                     command: out.keys.clone().unwrap_or_default(),
                     expect: None,
@@ -1305,7 +1306,7 @@ async fn run_action(
         // Feed the WHY back: without the reason, the model only sees
         // "assertion failed" and thrashes on new commands instead of
         // fixing the assertion itself.
-        failures: verify_failures,
+        failures: verify_failures.clone(),
     });
 
     // A step that ran but did not satisfy its assertions (or exited non-zero

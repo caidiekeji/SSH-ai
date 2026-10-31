@@ -16,7 +16,7 @@ use crate::ssh::session::{self, PtyCmd, SshAuth, SshConnectRequest};
 use crate::state::{AppState, ConnectionConfig};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 // ---------------------------------------------------------------------------
 // SSH

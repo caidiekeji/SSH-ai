@@ -435,9 +435,10 @@ pub fn trim_for_ai(raw: &str) -> String {
         .saturating_sub(head.len() + tail.len() + mid.len());
     let mut out = Vec::with_capacity(head.len() + mid.len() + tail.len() + 2);
     out.extend(head);
-    out.push(&format!(
+    let omitted_note = format!(
         "…（已省略中间 {omitted} 行，保留错误相关行与结尾）…"
-    ));
+    );
+    out.push(omitted_note.as_str());
     out.extend(mid);
     out.extend(tail);
     let joined = out.join("\n");
