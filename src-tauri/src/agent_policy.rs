@@ -72,6 +72,47 @@ pub fn is_assertive(e: Option<&ExpectSpec>) -> bool {
     }
 }
 
+/// True when a spec checks the command OUTPUT (contains / not_contains /
+/// regex). An exit-code-only spec is satisfied by `true` or `echo ok` —
+/// it proves nothing about the goal.
+pub fn has_output_check(e: &ExpectSpec) -> bool {
+    !e.contains.is_empty()
+        || !e.not_contains.is_empty()
+        || e.regex.as_ref().is_some_and(|r| !r.trim().is_empty())
+}
+
+/// May a passing verification count as goal evidence for the acceptance
+/// gate (the `reactive_verified` channel)?
+///
+/// Three requirements, all required:
+///  1. the step carried a machine-checkable spec at all;
+///  2. the spec checks the OUTPUT, not just the exit code — without this,
+///     a failing run could be "laundered" into a success by verifying
+///     `true` with `expect:{exit_code:0}`;
+///  3. when the plan defined acceptance steps, the verification must be the
+///     SAME command as one of them — the model must re-prove what the
+///     planner promised, not a trivial look-alike. (When the plan defined
+///     no acceptance steps there is nothing to match against; the output
+///     check is then the only barrier, and the `assert_count`/`verified_count`
+///     gates still apply.)
+pub fn verify_is_goal_evidence(
+    spec: Option<&ExpectSpec>,
+    command: &str,
+    acceptance_commands: &[String],
+) -> bool {
+    let Some(spec) = spec else {
+        return false;
+    };
+    if !has_output_check(spec) {
+        return false;
+    }
+    if acceptance_commands.is_empty() {
+        return true;
+    }
+    let cmd = command.trim();
+    acceptance_commands.iter().any(|c| c.trim() == cmd)
+}
+
 // ---------------------------------------------------------------------------
 // Policy layer
 // ---------------------------------------------------------------------------
@@ -528,6 +569,65 @@ mod tests {
         let mut r = ExpectSpec::default();
         r.regex = Some("  ".into());
         assert!(!is_assertive(Some(&r)));
+    }
+
+    #[test]
+    fn output_check_requires_an_output_level_field() {
+        // exit_code alone proves nothing — `true` satisfies it.
+        assert!(!has_output_check(&spec(Some(0), &[])));
+        assert!(has_output_check(&spec(None, &["active"])));
+        let mut nc = spec(None, &[]);
+        nc.not_contains.push("failed".into());
+        assert!(has_output_check(&nc));
+        let mut rx = spec(None, &[]);
+        rx.regex = Some("ok".into());
+        assert!(has_output_check(&rx));
+    }
+
+    #[test]
+    fn goal_evidence_needs_an_output_check() {
+        let acc = vec!["systemctl is-active nginx".to_string()];
+        // The laundering vector: exit-code-only spec on an unrelated command.
+        assert!(!verify_is_goal_evidence(Some(&spec(Some(0), &[])), "true", &acc));
+        assert!(!verify_is_goal_evidence(Some(&spec(Some(0), &[])), "echo ok", &acc));
+        // No spec at all → never evidence.
+        assert!(!verify_is_goal_evidence(None, "systemctl is-active nginx", &acc));
+        // Output-level check on the acceptance command → evidence.
+        assert!(verify_is_goal_evidence(
+            Some(&spec(Some(0), &["active"])),
+            "systemctl is-active nginx",
+            &acc
+        ));
+    }
+
+    #[test]
+    fn goal_evidence_must_re_prove_the_same_command() {
+        let acc = vec!["curl -s localhost:80".to_string()];
+        // Output check but a DIFFERENT command → not goal evidence.
+        assert!(!verify_is_goal_evidence(
+            Some(&spec(Some(0), &["ok"])),
+            "echo ok",
+            &acc
+        ));
+        // Whitespace differences do not change identity.
+        assert!(verify_is_goal_evidence(
+            Some(&spec(Some(0), &["ok"])),
+            "  curl -s localhost:80  ",
+            &acc
+        ));
+    }
+
+    #[test]
+    fn goal_evidence_without_acceptance_steps_falls_back_to_output_check() {
+        // The plan defined no acceptance steps (acceptance_ids empty): the
+        // output check is the only barrier here, and the assert_count /
+        // verified_count completion gates still guard the run.
+        assert!(verify_is_goal_evidence(
+            Some(&spec(Some(0), &["active"])),
+            "systemctl is-active nginx",
+            &[]
+        ));
+        assert!(!verify_is_goal_evidence(Some(&spec(Some(0), &[])), "true", &[]));
     }
 
     #[test]

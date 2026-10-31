@@ -602,7 +602,7 @@ pub async fn run_agent_step(
     ));
     if require_verification {
         user.push_str(
-            "\n[重要] 你刚才声称任务已完成，但尚未运行任何通过断言校验的验证命令。现在必须返回 {\"action\":\"verify\",...} 执行一条只读验证命令；只有看到符合预期的输出后才允许返回 done。\n",
+            "\n[重要] 你刚才声称任务已完成，但尚未运行任何通过断言校验的验证命令。现在必须返回 {\"action\":\"verify\",...} 执行一条只读验证命令；只有看到符合预期的输出后才允许返回 done。\n[验收规则] 验证命令必须重跑计划中的验收步骤原命令（换一条别的命令不算验收证据）；expect 必须包含输出级断言（contains / not_contains / regex），只写 exit_code 的验证不构成验收证据。\n",
         );
     }
     user.push_str("\n请返回下一步动作的 JSON。");

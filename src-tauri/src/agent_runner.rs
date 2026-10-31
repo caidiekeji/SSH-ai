@@ -437,6 +437,16 @@ pub async fn run_agent_task(
             })
             .collect::<Vec<_>>(),
     );
+    // The commands the planner promised as the goal's proof. A reactive
+    // verification only counts as goal evidence when it re-runs one of
+    // these (see `verify_is_goal_evidence`) — this is what stops the model
+    // from laundering a failed run with `true` + `expect:{exit_code:0}`.
+    let acceptance_commands: Vec<String> = plan
+        .steps
+        .iter()
+        .filter(|s| acceptance_ids.contains(&s.id))
+        .map(|s| s.command.clone())
+        .collect();
 
     // ---- Phase 1: execute the Planner's plan, respecting depends_on ----
     let mut done_ids: HashSet<u32> = HashSet::new();
@@ -503,6 +513,7 @@ pub async fn run_agent_task(
             &ctx,
             &mut plan_approved,
             &approved_commands,
+            &acceptance_commands,
             Action {
                 command: plan_step.command.clone(),
                 expect: Some(plan_step.expect.clone()),
@@ -795,6 +806,7 @@ pub async fn run_agent_task(
             &ctx,
             &mut plan_approved,
             &approved_commands,
+            &acceptance_commands,
             Action {
                 command: out.command.clone().unwrap_or_default(),
                 expect: spec,
@@ -839,12 +851,11 @@ pub async fn run_agent_task(
                     "任务已中止，请人工核实远端状态。",
                 );
             }
-            ActionOutcome::Ok { ok, verified } => {
+            ActionOutcome::Ok { ok, .. } => {
                 require_verification = false;
-                // A passing reactive verification IS evidence about the goal.
-                if is_verify && verified == Some(true) {
-                    acceptance_state.reactive_verified = true;
-                }
+                // Goal evidence from a passing verify is recorded INSIDE
+                // `run_action`, guarded by `verify_is_goal_evidence` — the
+                // loop must not set `reactive_verified` on its own.
                 if !ok {
                     recovery_fails += 1;
                 }
@@ -965,6 +976,7 @@ async fn run_action(
     ctx: &RunContext,
     plan_approved: &mut bool,
     approved_commands: &HashSet<String>,
+    acceptance_commands: &[String],
     action: Action,
 ) -> ActionOutcome {
     *step_no += 1;
@@ -1325,8 +1337,19 @@ async fn run_action(
         ));
     }
 
-    // A passing reactive verification is evidence about the goal.
-    if action.kind == StepKind::Verify && verified == Some(true) {
+    // A passing verification is goal evidence ONLY when it re-proves what
+    // the planner promised: the spec must check the OUTPUT (an exit-code-only
+    // check is satisfied by `true`), and when the plan defined acceptance
+    // steps the command must be one of them. Anything else must never
+    // satisfy the acceptance gate.
+    if action.kind == StepKind::Verify
+        && verified == Some(true)
+        && agent_policy::verify_is_goal_evidence(
+            action.expect.as_ref(),
+            &action.command,
+            acceptance_commands,
+        )
+    {
         acceptance_state.reactive_verified = true;
     }
     publish(app, run, snapshot);
