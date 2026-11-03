@@ -25,49 +25,102 @@ pub struct ChatOptions {
     pub max_tokens: Option<u32>,
 }
 
+/// Token accounting for one model call.
+///
+/// Not every provider reports usage (some OpenAI-compatible gateways omit
+/// it unless `stream_options.include_usage` is set), so the field is
+/// optional. It exists so a task can be costed instead of merely counted:
+/// without it, "the agent made 40 calls" says nothing about what it cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    // Serialized to the UI in camelCase (`promptTokens`), but parsed from
+    // the provider's snake_case payload (`prompt_tokens`). `rename` sets the
+    // canonical name, `alias` keeps the provider spelling accepted.
+    #[serde(default, rename = "promptTokens", alias = "prompt_tokens")]
+    pub prompt_tokens: u32,
+    #[serde(default, rename = "completionTokens", alias = "completion_tokens")]
+    pub completion_tokens: u32,
+}
+
+impl Usage {
+    pub fn total(&self) -> u32 {
+        self.prompt_tokens + self.completion_tokens
+    }
+}
+
+/// The result of one model call.
+#[derive(Debug, Clone, Default)]
+pub struct ChatOutcome {
+    /// Accumulated text.
+    pub text: String,
+    /// false on stream interruption; partial content is preserved.
+    pub complete: bool,
+    /// Token usage, when the provider reported it.
+    pub usage: Option<Usage>,
+}
+
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     /// List models. 404 => ProviderError::NoModelList (caller switches to
     /// manual input, PRD S3_MANUAL).
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
 
-    /// Streaming chat. Returns (accumulated_text, complete?) — complete=false
-    /// on stream interruption; partial content is preserved (PRD §3.3).
+    /// Streaming chat. Partial content is preserved on interruption
+    /// (PRD §3.3).
     async fn chat_stream(
         &self,
         messages: Vec<ChatMessage>,
         opts: ChatOptions,
         on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
-    ) -> Result<(String, bool), ProviderError>;
+    ) -> Result<ChatOutcome, ProviderError>;
 }
 
 // ---------------------------------------------------------------------------
 // HTTP plumbing shared by both adapters
 // ---------------------------------------------------------------------------
 
-fn client(timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        // HC-04: direct connection only — no system/env proxy (an API key
-        // must never transit a proxy we don't control) and no redirects.
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        .expect("reqwest client")
+/// Short-request client (model listing, connectivity probe). Also a
+/// singleton, so the TLS session is reused across calls.
+static SHORT_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn client(timeout: Duration) -> &'static reqwest::Client {
+    SHORT_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(timeout)
+            // HC-04: direct connection only — no system/env proxy (an API key
+            // must never transit a proxy we don't control) and no redirects.
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("reqwest client")
+    })
 }
 
 /// Streaming client: NO total deadline (reqwest's `timeout` covers the whole
 /// body read and would kill long SSE generations with "error decoding
 /// response body"). Instead: connect timeout + TCP keepalive here, and a
 /// per-chunk idle watchdog + wall-clock cap enforced in read_sse.
-fn stream_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .tcp_keepalive(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        .expect("reqwest client")
+///
+/// The client is a PROCESS-WIDE SINGLETON: an Agent task issues up to 40
+/// model calls, and a fresh `reqwest::Client` per call would mean a fresh
+/// TCP connection plus a fresh TLS handshake every time — the dominant
+/// per-call latency. Reusing one client keeps the connection pool alive, so
+/// a task's second call reuses the already-negotiated TLS session.
+static STREAM_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn stream_client() -> &'static reqwest::Client {
+    STREAM_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .tcp_keepalive(Duration::from_secs(30))
+            // Keep the pooled connection usable across calls; without this
+            // the pool may drop it right after each response.
+            .pool_idle_timeout(Duration::from_secs(90))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("reqwest client")
+    })
 }
 
 async fn map_response_error(resp: reqwest::Response) -> ProviderError {
@@ -168,7 +221,12 @@ struct OpenAiModelRef {
 
 #[derive(serde::Deserialize)]
 struct OpenAiChunk {
+    #[serde(default)]
     choices: Vec<OpenAiChunkChoice>,
+    /// Present only on the final chunk when `stream_options.include_usage`
+    /// is set. OpenAI's field names match `Usage` exactly.
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(serde::Deserialize)]
@@ -216,7 +274,7 @@ impl LLMProvider for OpenAIAdapter {
         messages: Vec<ChatMessage>,
         opts: ChatOptions,
         on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
-    ) -> Result<(String, bool), ProviderError> {
+    ) -> Result<ChatOutcome, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": self.model,
@@ -224,6 +282,9 @@ impl LLMProvider for OpenAIAdapter {
             "stream": true,
             "temperature": opts.temperature.unwrap_or(0.2),
             "max_tokens": opts.max_tokens.unwrap_or(2048),
+            // Ask for token accounting. Gateways that do not support the
+            // field ignore it; the ones that do now let us cost a task.
+            "stream_options": { "include_usage": true },
         });
         let resp = stream_client()
             .post(&url)
@@ -243,8 +304,10 @@ impl LLMProvider for OpenAIAdapter {
         }
 
         let mut accumulated = String::new();
+        let mut usage: Option<Usage> = None;
         let stream = resp.bytes_stream();
         let acc = &mut accumulated;
+        let usage_slot = &mut usage;
         read_sse(stream, |data| {
             if data == "[DONE]" {
                 return;
@@ -254,10 +317,17 @@ impl LLMProvider for OpenAIAdapter {
                     on_chunk(&c);
                     acc.push_str(&c);
                 }
+                if let Some(u) = chunk.usage {
+                    *usage_slot = Some(u);
+                }
             }
         })
         .await?;
-        Ok((accumulated, true))
+        Ok(ChatOutcome {
+            text: accumulated,
+            complete: true,
+            usage,
+        })
     }
 }
 
@@ -276,6 +346,26 @@ struct AnthropicChunk {
     #[serde(rename = "type")]
     kind: String,
     delta: Option<AnthropicDelta>,
+    /// Anthropic reports input tokens in `message_start` and output tokens
+    /// in `message_delta`.
+    #[serde(default)]
+    message: Option<AnthropicMessageStart>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(serde::Deserialize)]
+struct AnthropicMessageStart {
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(serde::Deserialize)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -302,7 +392,7 @@ impl LLMProvider for AnthropicAdapter {
         messages: Vec<ChatMessage>,
         opts: ChatOptions,
         on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
-    ) -> Result<(String, bool), ProviderError> {
+    ) -> Result<ChatOutcome, ProviderError> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         // Anthropic requires system as a top-level field.
         let (system, rest): (Vec<_>, Vec<_>) = messages
@@ -335,8 +425,12 @@ impl LLMProvider for AnthropicAdapter {
         }
 
         let mut accumulated = String::new();
+        let mut prompt_tokens: u32 = 0;
+        let mut completion_tokens: u32 = 0;
         let stream = resp.bytes_stream();
         let acc = &mut accumulated;
+        let pt = &mut prompt_tokens;
+        let ct = &mut completion_tokens;
         read_sse(stream, |data| {
             if let Ok(chunk) = serde_json::from_str::<AnthropicChunk>(data) {
                 if chunk.kind == "content_block_delta" {
@@ -345,9 +439,30 @@ impl LLMProvider for AnthropicAdapter {
                         acc.push_str(&text);
                     }
                 }
+                // `message_start` carries the input token count.
+                if let Some(u) = chunk.message.and_then(|m| m.usage) {
+                    *pt = u.input_tokens;
+                    *ct = u.output_tokens;
+                }
+                // `message_delta` carries the final output token count.
+                if let Some(u) = chunk.usage {
+                    *ct = u.output_tokens;
+                }
             }
         })
         .await?;
-        Ok((accumulated, true))
+        let usage = if prompt_tokens == 0 && completion_tokens == 0 {
+            None
+        } else {
+            Some(Usage {
+                prompt_tokens,
+                completion_tokens,
+            })
+        };
+        Ok(ChatOutcome {
+            text: accumulated,
+            complete: true,
+            usage,
+        })
     }
 }

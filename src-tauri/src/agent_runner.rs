@@ -35,6 +35,7 @@
 use crate::agent_plan::{verify_expectation, AgentPlan, ExpectSpec, PlanStep};
 use crate::agent_policy::{self, AcceptanceState, AgentPolicy, RiskLevel, StepKind};
 use crate::ai::{self, AgentStepIn, AgentStepOut};
+use crate::provider::adapters::Usage;
 use crate::provider::make_adapter;
 use crate::safety::risk::RiskLevel as EngineRiskLevel;
 use crate::state::AppState;
@@ -61,6 +62,13 @@ pub const HISTORY_CHAR_BUDGET: usize = 24_000;
 pub const MAX_UNPROVEN_DONE: u32 = 3;
 /// How many consecutive replan failures end the task.
 pub const MAX_RECOVERY_FAILS: u32 = 8;
+/// Token ceiling for ONE task (prompt + completion).
+///
+/// The call budget alone does not bound cost: a single call can carry a
+/// huge prompt. This is the real money ceiling. It only applies when the
+/// provider reports usage — providers that don't report it fall back to the
+/// call budget.
+pub const MAX_TOKENS: u32 = 400_000;
 
 // ---------------------------------------------------------------------------
 // Events pushed to the frontend
@@ -147,6 +155,12 @@ pub struct RunSnapshot {
     pub notice: String,
     /// The approval the backend is currently blocked on.
     pub approval: Option<ApprovalRequest>,
+    /// Tokens consumed so far, when the provider reports usage.
+    ///
+    /// Without this, "the agent made 12 calls" says nothing about what it
+    /// cost. A task's real budget is tokens, not calls.
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 /// The event payload pushed to the frontend.
@@ -262,6 +276,14 @@ pub struct RunContext {
     pub policy: AgentPolicy,
 }
 
+/// The model adapter, resolved ONCE per task.
+///
+/// Rebuilding it per model call meant re-reading the API key from the OS
+/// Keychain (a real IPC round trip on Windows/macOS) and re-deriving the
+/// provider profile for every single step. A task issues up to 40 model
+/// calls, so this was 40 needless Keychain hits.
+pub type RunAdapter = Box<dyn crate::provider::adapters::LLMProvider>;
+
 /// Run one agent task to completion.
 ///
 /// This is the whole five-layer loop. It never blocks the caller's thread and
@@ -283,6 +305,7 @@ pub async fn run_agent_task(
         error: String::new(),
         notice: String::new(),
         approval: None,
+        usage: None,
     };
 
     // The Planner needs the agent shell's LIVE cwd: the connect-time probe
@@ -316,10 +339,31 @@ pub async fn run_agent_task(
     let started = Instant::now();
     let mut llm_calls: u32 = 0;
 
+    // Resolve the model adapter ONCE for the whole task. Rebuilding it per
+    // call re-read the API key from the OS Keychain every time.
+    let adapter: RunAdapter = match make_run_adapter(&state, ctx.profile_id.as_deref()) {
+        Ok(a) => a,
+        Err(e) => {
+            return finish(
+                &app,
+                &state,
+                &run,
+                &mut snapshot,
+                RunStatus::Failed,
+                &format!("{e}"),
+            );
+        }
+    };
+
     // --- PLANNER ---------------------------------------------------------
     llm_calls += 1;
-    let plan: AgentPlan = match call_plan(&state, &ctx, &agent_cwd).await {
-        Ok(p) => p,
+    let plan: AgentPlan = match call_plan(&state, &ctx, adapter.as_ref(), &agent_cwd).await {
+        Ok((p, u)) => {
+            if let Some(u) = u {
+                snapshot.usage = Some(u);
+            }
+            p
+        }
         Err(e) => {
             return finish(
                 &app,
@@ -616,6 +660,23 @@ pub async fn run_agent_task(
                 ),
             );
         }
+        // Token budget — the real cost ceiling. Only enforceable when the
+        // provider reports usage.
+        if let Some(u) = snapshot.usage {
+            let total = u.total();
+            if total > MAX_TOKENS {
+                return finish(
+                    &app,
+                    &state,
+                    &run,
+                    &mut snapshot,
+                    RunStatus::Failed,
+                    &format!(
+                        "任务超出 token 预算（{total}/{MAX_TOKENS}），任务中止。请人工核对。"
+                    ),
+                );
+            }
+        }
 
         let goal_with_memory = agent_policy::build_goal_with_memory(
             &ctx.goal,
@@ -632,6 +693,7 @@ pub async fn run_agent_task(
         let out: AgentStepOut = match call_step(
             &state,
             &ctx,
+            adapter.as_ref(),
             &agent_cwd,
             &goal_with_memory,
             &history,
@@ -639,7 +701,18 @@ pub async fn run_agent_task(
         )
         .await
         {
-            Ok(o) => o,
+            Ok((o, u)) => {
+                if let Some(u) = u {
+                    snapshot.usage = Some(match snapshot.usage {
+                        Some(prev) => Usage {
+                            prompt_tokens: prev.prompt_tokens + u.prompt_tokens,
+                            completion_tokens: prev.completion_tokens + u.completion_tokens,
+                        },
+                        None => u,
+                    });
+                }
+                o
+            }
             Err(e) => {
                 return finish(
                     &app,
@@ -1072,6 +1145,67 @@ async fn run_action(
     }
     if run.is_cancelled() {
         return ActionOutcome::Stopped;
+    }
+
+    // --- Idempotency: don't re-run what already verified ----------------
+    // An identical command whose earlier run PASSED its assertion cannot
+    // yield new information. Re-running it burns a remote execution, a
+    // step and a round of model tokens for nothing. The earlier output is
+    // replayed verbatim so the planner still sees the result.
+    if action.kind == StepKind::Exec {
+        let prior: Vec<(String, bool, String)> = executed
+            .iter()
+            .filter(|e| e.kind == StepKind::Exec.as_str())
+            .map(|e| {
+                (
+                    e.command.clone(),
+                    e.verified.unwrap_or(false),
+                    e.output.clone(),
+                )
+            })
+            .collect();
+        if let agent_policy::IdempotencyVerdict::Skip { previous_output } =
+            agent_policy::check_idempotent(&action.command, &prior)
+        {
+            let reason = format!(
+                "【已跳过】命令与此前已通过断言的一次执行完全相同，结果不会改变。复用上次输出：\n{}",
+                previous_output
+            );
+            snapshot.steps.push(StepRecord {
+                no: this_step,
+                command: action.command.clone(),
+                description: action.description.clone(),
+                output: reason.clone(),
+                risk: level.as_str().to_string(),
+                kind: action.kind.as_str().to_string(),
+                verified: Some(true),
+                verify_failures: None,
+                exit_code: Some(0),
+            });
+            executed.push(AgentStepIn {
+                command: action.command.clone(),
+                output: previous_output,
+                kind: action.kind.as_str().to_string(),
+                description: action.description.clone(),
+                expect: action.expect_text.clone().unwrap_or_default(),
+                verified: Some(true),
+                exit_code: Some(0),
+                failures: vec![],
+            });
+            snapshot.memory.facts.push(format!(
+                "{} → 断言通过（本次跳过重复执行，复用先前结果）",
+                action.command
+            ));
+            // The skipped step still counts as a fresh passing verification:
+            // the acceptance rule compares last_pass_at against last_fail_at,
+            // and this step is the newest evidence.
+            acceptance_state.last_pass_at = this_step as i64;
+            publish(app, run, snapshot);
+            return ActionOutcome::Ok {
+                ok: true,
+                verified: Some(true),
+            };
+        }
     }
 
     // --- Executor: run it on the persistent shell ------------------------
@@ -1536,18 +1670,21 @@ async fn grounding(state: &AppState, session_id: u64, agent_cwd: &str) -> (Strin
 }
 
 /// Ask the model for the whole plan, with retries on transient failures.
+///
+/// Returns the plan together with the token usage of the call that
+/// produced it, so the caller can cost the task.
 async fn call_plan(
     state: &AppState,
     ctx: &RunContext,
+    adapter: &dyn crate::provider::adapters::LLMProvider,
     agent_cwd: &str,
-) -> Result<AgentPlan, String> {
-    let adapter = make_run_adapter(state, ctx.profile_id.as_deref())?;
+) -> Result<(AgentPlan, Option<Usage>), String> {
     let (sys_text, tail) = grounding(state, ctx.session_id, agent_cwd).await;
     let custom = state.agent_prompt();
     let mut last = String::new();
     for attempt in 0..3u32 {
         match ai::run_agent_plan(
-            adapter.as_ref(),
+            adapter,
             &ctx.goal,
             &sys_text,
             &tail,
@@ -1576,18 +1713,18 @@ async fn call_plan(
 async fn call_step(
     state: &AppState,
     ctx: &RunContext,
+    adapter: &dyn crate::provider::adapters::LLMProvider,
     agent_cwd: &str,
     goal: &str,
     history: &[AgentStepIn],
     require_verification: bool,
-) -> Result<AgentStepOut, String> {
-    let adapter = make_run_adapter(state, ctx.profile_id.as_deref())?;
+) -> Result<(AgentStepOut, Option<Usage>), String> {
     let (sys_text, tail) = grounding(state, ctx.session_id, agent_cwd).await;
     let custom = state.agent_prompt();
     let mut last = String::new();
     for attempt in 0..3u32 {
         match ai::run_agent_step(
-            adapter.as_ref(),
+            adapter,
             goal,
             history,
             &sys_text,

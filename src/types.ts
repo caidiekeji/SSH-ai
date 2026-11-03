@@ -201,6 +201,17 @@ export interface AgentRunSnapshot {
   error: string;
   notice: string;
   approval?: AgentApproval | null;
+  /**
+   * Tokens consumed so far, when the provider reports usage. The call
+   * count alone does not say what a task cost.
+   */
+  usage?: AgentUsage | null;
+}
+
+/** Token accounting for one task. */
+export interface AgentUsage {
+  promptTokens: number;
+  completionTokens: number;
 }
 
 /** The event payload the backend emits on every state change. */

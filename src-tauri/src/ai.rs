@@ -8,7 +8,7 @@
 
 use crate::pipeline::context::{build_context, format_system_context};
 use crate::pipeline::pipeline::{ErrorBlock, Pipeline, SystemInfo};
-use crate::provider::adapters::{ChatMessage, ChatOptions, LLMProvider};
+use crate::provider::adapters::{ChatMessage, ChatOptions, LLMProvider, Usage};
 use serde::{Deserialize, Serialize};
 
 /// What the AI path is allowed to return. Pure data — nothing here executes.
@@ -252,10 +252,10 @@ pub async fn run_diagnosis(
     on_chunk: &mut (dyn for<'a> FnMut(&'a str) + Send),
 ) -> Result<DiagnosisResult, crate::provider::error::ProviderError> {
     let messages = build_messages(req);
-    let (text, complete) = provider
+    let outcome = provider
         .chat_stream(messages, ChatOptions::default(), on_chunk)
         .await?;
-    Ok(parse_response(&text, !complete)) // PRD §3.3: surface truncation
+    Ok(parse_response(&outcome.text, !outcome.complete)) // PRD §3.3: surface truncation
 }
 
 // ---------------------------------------------------------------------------
@@ -305,10 +305,10 @@ pub async fn run_chat(
         role: "user".into(),
         content: question.into(),
     });
-    let (text, _complete) = provider
+    let outcome = provider
         .chat_stream(messages, ChatOptions::default(), on_chunk)
         .await?;
-    Ok(text)
+    Ok(outcome.text)
 }
 
 // ---------------------------------------------------------------------------
@@ -526,6 +526,14 @@ pub fn parse_agent_response_obj(raw: &str) -> Result<AgentStepOut, String> {
 /// and independent of whatever wording the model produced.
 pub const AGENT_REPLY_MALFORMED: &str = "AGENT_REPLY_MALFORMED";
 
+/// How many of the most recent steps keep their FULL output in the prompt.
+///
+/// Older steps are reduced to a verdict (exit code, assertion result,
+/// failure reason) plus a one-line digest. Replaying every byte of every
+/// past output on every replan makes the prompt grow with the step count,
+/// which is both slow and expensive.
+pub const RECENT_FULL_OUTPUT_STEPS: usize = 3;
+
 /// Plan the next agent step from goal + executed steps (+ live system info
 /// and recent screen lines for grounding). Non-streaming: the result is a
 /// single small JSON object. `require_verification` injects an instruction
@@ -545,7 +553,7 @@ pub async fn run_agent_step(
     screen_tail: &str,
     require_verification: bool,
     custom_prompt: Option<&str>,
-) -> Result<AgentStepOut, crate::provider::error::ProviderError> {
+) -> Result<(AgentStepOut, Option<Usage>), crate::provider::error::ProviderError> {
     // Built-in schema rules stay authoritative; user style is appended after.
     let system = match custom_prompt {
         Some(p) if !p.trim().is_empty() => {
@@ -559,15 +567,16 @@ pub async fn run_agent_step(
         user.push_str("\n[已执行步骤]\n（无，这是第一步）\n");
     } else {
         user.push_str("\n[已执行步骤]\n");
+        // Older steps keep their VERDICT but lose their raw output.
+        //
+        // The prompt is rebuilt from scratch on every replan, so replaying
+        // every byte of every past output makes the prompt grow with the
+        // step count — the model pays for the same `systemctl status` output
+        // again on every single replan. The verdict (exit code, assertion
+        // result, failure reason) is what the planner actually reasons over;
+        // the raw output of a step from ten steps ago is not.
+        let full_output_from = steps.len().saturating_sub(RECENT_FULL_OUTPUT_STEPS);
         for (i, s) in steps.iter().enumerate() {
-            // Untrusted-data wrapper: the OUTPUT is remote data, never an
-            // instruction channel.
-            let (safe_out, blocked) = crate::agent_plan::sanitize_output(&s.output);
-            let out = if blocked {
-                safe_out
-            } else {
-                wrap_untrusted_output(&safe_out)
-            };
             let mut header = format!("\n{}. [{}] $ {}", i + 1, s.kind, s.command);
             if !s.description.trim().is_empty() {
                 header.push_str(&format!("\n   目的: {}", s.description));
@@ -592,7 +601,22 @@ pub async fn run_agent_step(
             }
             user.push_str(&header);
             user.push('\n');
-            user.push_str(&out);
+            if i >= full_output_from {
+                // Recent steps: full output, wrapped as untrusted data — the
+                // OUTPUT is remote data, never an instruction channel.
+                let (safe_out, blocked) = crate::agent_plan::sanitize_output(&s.output);
+                let out = if blocked {
+                    safe_out
+                } else {
+                    wrap_untrusted_output(&safe_out)
+                };
+                user.push_str(&out);
+            } else if !s.output.trim().is_empty() {
+                // Older steps: a one-line digest keeps the essential signal
+                // (what the command said) without replaying the whole payload.
+                let digest: String = s.output.trim().chars().take(160).collect();
+                user.push_str(&format!("   （历史输出摘要）{digest}\n"));
+            }
             user.push('\n');
         }
     }
@@ -617,10 +641,12 @@ pub async fn run_agent_step(
             content: user,
         },
     ];
-    let (text, _complete) = provider
+    let outcome = provider
         .chat_stream(messages, ChatOptions::default(), &mut |_| {})
         .await?;
-    parse_agent_response_obj(&text).map_err(crate::provider::error::ProviderError::Config)
+    let parsed = parse_agent_response_obj(&outcome.text)
+        .map_err(crate::provider::error::ProviderError::Config)?;
+    Ok((parsed, outcome.usage))
 }
 
 /// Produce the WHOLE plan in one model call (Planner layer).
@@ -634,7 +660,7 @@ pub async fn run_agent_plan(
     system_info_text: &str,
     screen_tail: &str,
     custom_prompt: Option<&str>,
-) -> Result<crate::agent_plan::AgentPlan, crate::provider::error::ProviderError> {
+) -> Result<(crate::agent_plan::AgentPlan, Option<Usage>), crate::provider::error::ProviderError> {
     let system = match custom_prompt {
         Some(p) if !p.trim().is_empty() => {
             let trimmed: String = p.trim().chars().take(1000).collect();
@@ -658,10 +684,12 @@ pub async fn run_agent_plan(
             content: user,
         },
     ];
-    let (text, _complete) = provider
+    let outcome = provider
         .chat_stream(messages, ChatOptions::default(), &mut |_| {})
         .await?;
-    crate::agent_plan::parse_plan(&text).map_err(crate::provider::error::ProviderError::Config)
+    let parsed = crate::agent_plan::parse_plan(&outcome.text)
+        .map_err(crate::provider::error::ProviderError::Config)?;
+    Ok((parsed, outcome.usage))
 }
 
 #[cfg(test)]

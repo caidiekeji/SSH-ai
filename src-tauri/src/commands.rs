@@ -360,11 +360,15 @@ pub async fn test_provider(
         content: "回复一个字：好".into(),
     }];
     let mut collected = String::new();
-    let (text, _complete) = adapter
+    let outcome = adapter
         .chat_stream(messages, Default::default(), &mut |c| collected.push_str(c))
         .await
         .map_err(|e| e.to_string())?;
-    let reply = if text.is_empty() { &collected } else { &text };
+    let reply = if outcome.text.is_empty() {
+        &collected
+    } else {
+        &outcome.text
+    };
     Ok(serde_json::json!({
         "ok": true,
         "model": profile.model,
@@ -653,7 +657,10 @@ pub async fn agent_step(
         None => sys_text,
     };
     let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
-    run_agent_step(
+    // The token usage of this call is dropped on purpose: this command is a
+    // thin debug/MCP primitive, and the real controller (agent_runner) does
+    // its own accounting and publishes it in the run snapshot.
+    let (out, _usage) = run_agent_step(
         adapter.as_ref(),
         &goal,
         &steps,
@@ -663,7 +670,8 @@ pub async fn agent_step(
         state.agent_prompt().as_deref(),
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +780,6 @@ pub async fn sftp_download(
     session_id: u64,
     remote_path: String,
 ) -> Result<String, String> {
-    use tauri::Manager;
     let sftp = open_sftp(&state, session_id).await?;
     let meta = sftp
         .metadata(&remote_path)
@@ -1475,7 +1482,8 @@ pub async fn agent_plan(
         None => sys_text,
     };
     let adapter = make_adapter(&profile, &key).map_err(|e| e.to_string())?;
-    run_agent_plan(
+    // See `agent_step`: usage accounting lives in the controller.
+    let (plan, _usage) = run_agent_plan(
         adapter.as_ref(),
         &goal,
         &sys_text,
@@ -1483,7 +1491,8 @@ pub async fn agent_plan(
         state.agent_prompt().as_deref(),
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok(plan)
 }
 
 /// Write keystrokes into the USER-VISIBLE terminal on behalf of the agent.
@@ -1711,6 +1720,7 @@ pub async fn agent_run_start(
             error: String::new(),
             notice: String::new(),
             approval: None,
+            usage: None,
         })),
         approval_tx: Arc::new(Mutex::new(None)),
     });
@@ -1726,24 +1736,18 @@ pub async fn agent_run_start(
         policy: crate::agent_policy::AgentPolicy::from_setting(&policy_raw),
     };
 
-    // The controller needs an owned AppState to outlive this command. The
-    // state is registered with Tauri, so it can be looked up again inside
-    // the task via the app handle. Cloning is cheap: every mutable part is
-    // `Arc`-wrapped, so the clone shares the same sessions, settings and
+    // The controller needs an OWNED AppState to outlive this command (the
+    // `State` handle borrows the app handle and cannot be moved into the
+    // spawned task).
+    //
+    // `AppState::clone(..)` is written out on purpose: `state.inner()` yields
+    // `&AppState`, and `(&AppState).clone()` would clone the REFERENCE (not
+    // the state). An explicit clone gives an owned state; every mutable part
+    // is `Arc`-wrapped, so the clone shares the same sessions, settings and
     // risk engine as the original.
+    let owned_state = AppState::clone(state.inner());
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        // Clone the state BEFORE moving `app_clone` into the controller: the
-        // `State` handle borrows the app handle, so keeping it alive across
-        // the move would be a borrow error.
-        //
-        // `AppState::clone(..)` is written out on purpose: `state.inner()`
-        // yields `&AppState`, and `(&AppState).clone()` would clone the
-        // REFERENCE (not the state) — and that reference would dangle as
-        // soon as the temporary `State` is dropped. An explicit clone gives
-        // an OWNED state; every mutable part is `Arc`-wrapped, so the clone
-        // shares the same sessions, settings and risk engine.
-        let owned_state = AppState::clone(app_clone.state::<AppState>().inner());
         crate::agent_runner::run_agent_task(app_clone, owned_state, run, ctx).await;
     });
 
