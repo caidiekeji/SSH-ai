@@ -417,9 +417,14 @@ pub fn check_idempotent(
     if norm.is_empty() {
         return IdempotencyVerdict::Proceed;
     }
-    // Scan newest-first: the most recent verified result wins.
-    for (cmd, verified, output) in prior.iter().rev() {
-        if normalize_command(cmd) == norm && *verified {
+    // Only the MOST RECENT run of this command decides. If that newest run
+    // verified, reuse its output; if it failed (or is unverified), re-run it.
+    // An older verified run must NOT let us skip a newer failed one — that is
+    // precisely the retry loop's job.
+    if let Some((_, verified, output)) =
+        prior.iter().rev().find(|(cmd, _, _)| normalize_command(cmd) == norm)
+    {
+        if *verified {
             return IdempotencyVerdict::Skip {
                 previous_output: output.clone(),
             };
