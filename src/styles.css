@@ -1728,24 +1728,24 @@ button.small { padding: 2px 9px; font-size: 12px; border-radius: 6px; }
   flex: 1;
   min-width: 0;
   display: flex;
-  gap: 5px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  padding-bottom: 1px;
+  flex-wrap: wrap;
+  gap: 4px;
 }
-.composer-modes::-webkit-scrollbar { display: none; }
 .mode-chip {
   white-space: nowrap;
   flex-shrink: 0;
-  padding: 4px 7px;
+  padding: 3px 6px;
+  gap: 3px;
+  font-size: 11px;
 }
+.mode-chip svg { width: 13px; height: 13px; }
 .composer-send {
   white-space: nowrap;
   flex-shrink: 0;
   padding: 7px 10px;
   letter-spacing: 0;
 }
-.composer-foot { gap: 10px; }
+.composer-foot { gap: 8px; }
 
 /* ---- 提示词库 ---- */
 .prompt-form {
@@ -1817,7 +1817,7 @@ button.primary, button:not([class]) { transition: filter 150ms ease, border-colo
 }
 
 /* ---- icon-only mode chips & mini icon buttons ---- */
-.mode-chip { padding: 4px 7px; gap: 4px; }
+.mode-chip { padding: 3px 6px; gap: 3px; }
 .mini.icon-only {
   padding: 4px 7px;
   display: inline-flex;
