@@ -380,6 +380,54 @@ pub fn trim_history<T: Clone>(list: &[T], budget: usize, cost_of: impl Fn(&T) ->
     kept
 }
 
+/// Normalize a command so two spellings of the same intent compare equal.
+///
+/// Whitespace around the command, and repeated inner spaces, carry no
+/// meaning for the shell but do defeat exact-match deduplication.
+pub fn normalize_command(cmd: &str) -> String {
+    cmd.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Should this command be short-circuited because it already ran?
+///
+/// Re-running an identical command that already produced a PASSING result
+/// burns a step, a remote execution and a round of model tokens, and changes
+/// nothing — the classic "the model asks `systemctl status nginx` five times
+/// in a row" waste.
+///
+/// Only a command whose earlier run VERIFIED is short-circuited. A command
+/// that failed must be retried (that is the whole point of the retry loop),
+/// and a command with no assertion is left alone, because its result may
+/// legitimately have changed in the meantime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencyVerdict {
+    /// Execute it.
+    Proceed,
+    /// Already verified — reuse the previous output instead of re-running.
+    Skip { previous_output: String },
+}
+
+/// Decide whether a command may be skipped because an identical one already
+/// succeeded with a passing assertion.
+pub fn check_idempotent(
+    command: &str,
+    prior: &[(String, bool, String)],
+) -> IdempotencyVerdict {
+    let norm = normalize_command(command);
+    if norm.is_empty() {
+        return IdempotencyVerdict::Proceed;
+    }
+    // Scan newest-first: the most recent verified result wins.
+    for (cmd, verified, output) in prior.iter().rev() {
+        if normalize_command(cmd) == norm && *verified {
+            return IdempotencyVerdict::Skip {
+                previous_output: output.clone(),
+            };
+        }
+    }
+    IdempotencyVerdict::Proceed
+}
+
 // ---------------------------------------------------------------------------
 // Output shaping
 // ---------------------------------------------------------------------------
@@ -435,9 +483,10 @@ pub fn trim_for_ai(raw: &str) -> String {
         .saturating_sub(head.len() + tail.len() + mid.len());
     let mut out = Vec::with_capacity(head.len() + mid.len() + tail.len() + 2);
     out.extend(head);
-    out.push(&format!(
+    let omitted_note = format!(
         "…（已省略中间 {omitted} 行，保留错误相关行与结尾）…"
-    ));
+    );
+    out.push(omitted_note.as_str());
     out.extend(mid);
     out.extend(tail);
     let joined = out.join("\n");
@@ -530,8 +579,14 @@ pub const RETRYABLE_AI_ERRORS: [&str; 9] = [
 ];
 
 /// Is this error worth another attempt?
+///
+/// A malformed model reply counts. The marker is a stable, greppable token
+/// precisely so the retry layer can recognise it without guessing from the
+/// model's wording; without it here, a model that answers with one sentence
+/// of prose instead of JSON killed the whole task instead of being retried.
 pub fn is_retryable_ai_error(msg: &str) -> bool {
-    RETRYABLE_AI_ERRORS.iter().any(|k| msg.contains(k))
+    msg.contains(crate::ai::AGENT_REPLY_MALFORMED)
+        || RETRYABLE_AI_ERRORS.iter().any(|k| msg.contains(k))
 }
 
 #[cfg(test)]
@@ -955,5 +1010,85 @@ mod tests {
         assert!(is_retryable_ai_error("响应中断"));
         assert!(!is_retryable_ai_error("API Key 未配置"));
         assert!(!is_retryable_ai_error("模型返回的 JSON 字段不合法"));
+    }
+
+    #[test]
+    fn malformed_reply_is_retryable() {
+        // The marker is what lets the retry layer recognise a malformed
+        // reply without guessing from the model's wording. Without it, one
+        // sentence of prose killed the whole task.
+        assert!(is_retryable_ai_error(
+            "AGENT_REPLY_MALFORMED 模型未返回可解析的 JSON"
+        ));
+    }
+
+    #[test]
+    fn identical_verified_command_is_skipped() {
+        let prior = vec![(
+            "systemctl status nginx".to_string(),
+            true,
+            "active (running)".to_string(),
+        )];
+        match check_idempotent("systemctl status nginx", &prior) {
+            IdempotencyVerdict::Skip { previous_output } => {
+                assert_eq!(previous_output, "active (running)");
+            }
+            IdempotencyVerdict::Proceed => panic!("应当跳过重复且已通过断言的命令"),
+        }
+    }
+
+    #[test]
+    fn whitespace_differences_do_not_defeat_dedup() {
+        let prior = vec![(
+            "systemctl   status   nginx".to_string(),
+            true,
+            "ok".to_string(),
+        )];
+        assert!(matches!(
+            check_idempotent(" systemctl status nginx ", &prior),
+            IdempotencyVerdict::Skip { .. }
+        ));
+    }
+
+    #[test]
+    fn failed_command_is_not_skipped() {
+        // A failed command MUST be retried — that is the retry loop's job.
+        let prior = vec![("curl localhost".to_string(), false, "refused".to_string())];
+        assert!(matches!(
+            check_idempotent("curl localhost", &prior),
+            IdempotencyVerdict::Proceed
+        ));
+    }
+
+    #[test]
+    fn unverified_command_is_not_skipped() {
+        // Without an assertion the result may legitimately have changed.
+        let prior = vec![("date".to_string(), false, "now".to_string())];
+        assert!(matches!(
+            check_idempotent("date", &prior),
+            IdempotencyVerdict::Proceed
+        ));
+    }
+
+    #[test]
+    fn newest_verified_result_wins() {
+        let prior = vec![
+            ("cat /etc/hosts".to_string(), true, "old".to_string()),
+            ("cat /etc/hosts".to_string(), false, "new".to_string()),
+        ];
+        // The most recent run failed, so the command must be retried.
+        assert!(matches!(
+            check_idempotent("cat /etc/hosts", &prior),
+            IdempotencyVerdict::Proceed
+        ));
+    }
+
+    #[test]
+    fn empty_command_is_never_skipped() {
+        let prior = vec![("".to_string(), true, "x".to_string())];
+        assert!(matches!(
+            check_idempotent("  ", &prior),
+            IdempotencyVerdict::Proceed
+        ));
     }
 }

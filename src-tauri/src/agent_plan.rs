@@ -283,7 +283,96 @@ pub fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
     if steps.is_empty() {
         return Err("计划为空（没有可执行的步骤）".into());
     }
+    normalize_step_ids(&mut steps);
+    validate_dependency_graph(&steps)?;
     Ok(AgentPlan { steps })
+}
+
+/// Give every step a unique, stable id.
+///
+/// The model may omit `id` (in which case the positional index is used) or
+/// repeat it. Repeats would make `depends_on` ambiguous — two different
+/// steps share an id, so "wait for step 3" becomes undecidable. Ids are
+/// therefore renumbered to 1..N, and `depends_on` is remapped onto the new
+/// numbering so the model's intent survives.
+fn normalize_step_ids(steps: &mut [PlanStep]) {
+    // Map the OLD id of each step to its NEW id (1-based position).
+    let mut old_to_new: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for (i, s) in steps.iter().enumerate() {
+        old_to_new.entry(s.id).or_insert(i as u32 + 1);
+    }
+    for (i, s) in steps.iter_mut().enumerate() {
+        s.id = i as u32 + 1;
+        // Remap dependencies onto the new numbering; a dependency on an
+        // unknown id is dropped and reported by validate_dependency_graph.
+        s.depends_on = s
+            .depends_on
+            .iter()
+            .filter_map(|d| old_to_new.get(d).copied())
+            .collect();
+        // Drop self-references introduced by the remap.
+        let self_id = s.id;
+        s.depends_on.retain(|d| *d != self_id);
+    }
+}
+
+/// Validate the plan's dependency graph BEFORE execution.
+///
+/// Without this, a malformed graph (duplicate ids, a dependency on a step
+/// that does not exist, or a cycle) makes the executor silently stall:
+/// `pick_runnable_step` finds nothing runnable, the run "completes" with
+/// steps never executed, and the user sees "完成" for a plan that never ran.
+/// Rejecting the plan up front turns that into one clear model-visible
+/// error and a retry.
+pub fn validate_dependency_graph(steps: &[PlanStep]) -> Result<(), String> {
+    let mut seen: Vec<u32> = Vec::with_capacity(steps.len());
+    for s in steps {
+        if seen.contains(&s.id) {
+            return Err(format!("计划步骤 id 重复: {}", s.id));
+        }
+        seen.push(s.id);
+    }
+    for s in steps {
+        for d in &s.depends_on {
+            if *d == s.id {
+                return Err(format!("计划步骤 {} 依赖自身", s.id));
+            }
+            if !seen.contains(d) {
+                return Err(format!("计划步骤 {} 依赖不存在的步骤 {}", s.id, d));
+            }
+        }
+    }
+    // Cycle detection: DFS with a colouring (0 = unvisited, 1 = on stack,
+    // 2 = done).
+    let mut color: Vec<u8> = vec![0; steps.len()];
+    fn visit(
+        idx: usize,
+        steps: &[PlanStep],
+        color: &mut Vec<u8>,
+        pos: &std::collections::HashMap<u32, usize>,
+    ) -> Result<(), String> {
+        color[idx] = 1;
+        for d in &steps[idx].depends_on {
+            let Some(&next) = pos.get(d) else { continue };
+            match color[next] {
+                1 => return Err(format!("计划依赖存在环: {} → {}", steps[idx].id, d)),
+                0 => visit(next, steps, color, pos)?,
+                _ => {}
+            }
+        }
+        color[idx] = 2;
+        Ok(())
+    }
+    let mut pos = std::collections::HashMap::new();
+    for (i, s) in steps.iter().enumerate() {
+        pos.insert(s.id, i);
+    }
+    for i in 0..steps.len() {
+        if color[i] == 0 {
+            visit(i, steps, &mut color, &pos)?;
+        }
+    }
+    Ok(())
 }
 
 /// Accept both the structured form and the legacy free-text form
@@ -605,5 +694,79 @@ mod tests {
         assert!(s2.is_assertive());
         assert_eq!(s2.contains, vec!["installed".to_string()]);
         assert_eq!(s2.exit_code, Some(0));
+    }
+
+    fn step(id: u32, depends_on: Vec<u32>) -> PlanStep {
+        PlanStep {
+            id,
+            intent: format!("step {id}"),
+            command: format!("echo {id}"),
+            expect: ExpectSpec::default(),
+            risk_hint: String::new(),
+            depends_on,
+            required: false,
+        }
+    }
+
+    #[test]
+    fn valid_dependency_graph_passes() {
+        let steps = vec![step(1, vec![]), step(2, vec![1]), step(3, vec![2])];
+        assert!(validate_dependency_graph(&steps).is_ok());
+    }
+
+    #[test]
+    fn duplicate_step_id_is_rejected() {
+        let steps = vec![step(1, vec![]), step(1, vec![])];
+        let e = validate_dependency_graph(&steps).unwrap_err();
+        assert!(e.contains("重复"), "unexpected message: {e}");
+    }
+
+    #[test]
+    fn duplicate_ids_are_renumbered_and_dependencies_survive() {
+        // The model may repeat an id. Ids are renumbered to 1..N and the
+        // dependency that pointed at the old id follows the step.
+        let raw = r#"{"steps":[
+            {"id":7,"intent":"a","command":"echo 1"},
+            {"id":7,"intent":"b","command":"echo 2","depends_on":[7]}
+        ]}"#;
+        let plan = parse_plan(raw).expect("应当归一化后通过");
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].id, 1);
+        assert_eq!(plan.steps[1].id, 2);
+        // The dependency pointed at the FIRST step with id 7.
+        assert_eq!(plan.steps[1].depends_on, vec![1]);
+    }
+
+    #[test]
+    fn dangling_dependency_is_rejected() {
+        let steps = vec![step(1, vec![99])];
+        let e = validate_dependency_graph(&steps).unwrap_err();
+        assert!(e.contains("不存在的步骤"), "unexpected message: {e}");
+    }
+
+    #[test]
+    fn self_dependency_is_rejected() {
+        let steps = vec![step(1, vec![1])];
+        let e = validate_dependency_graph(&steps).unwrap_err();
+        assert!(e.contains("依赖自身"), "unexpected message: {e}");
+    }
+
+    #[test]
+    fn dependency_cycle_is_rejected() {
+        // A cycle makes every step in it unrunnable: the executor finds no
+        // runnable step and the task "completes" without doing the work.
+        let steps = vec![step(1, vec![2]), step(2, vec![1])];
+        let e = validate_dependency_graph(&steps).unwrap_err();
+        assert!(e.contains("环"), "unexpected message: {e}");
+    }
+
+    #[test]
+    fn parse_plan_rejects_a_cyclic_graph() {
+        let raw = r#"{"steps":[
+            {"id":1,"intent":"a","command":"echo 1","depends_on":[2]},
+            {"id":2,"intent":"b","command":"echo 2","depends_on":[1]}
+        ]}"#;
+        let e = parse_plan(raw).unwrap_err();
+        assert!(e.contains("环"), "unexpected message: {e}");
     }
 }
