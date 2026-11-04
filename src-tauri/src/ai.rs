@@ -645,7 +645,7 @@ pub async fn run_agent_step(
         .chat_stream(messages, ChatOptions::default(), &mut |_| {})
         .await?;
     let parsed = parse_agent_response_obj(&outcome.text)
-        .map_err(crate::provider::error::ProviderError::Config)?;
+        .map_err(crate::provider::error::ProviderError::MalformedReply)?;
     Ok((parsed, outcome.usage))
 }
 
@@ -687,8 +687,12 @@ pub async fn run_agent_plan(
     let outcome = provider
         .chat_stream(messages, ChatOptions::default(), &mut |_| {})
         .await?;
-    let parsed = crate::agent_plan::parse_plan(&outcome.text)
-        .map_err(crate::provider::error::ProviderError::Config)?;
+    let parsed = crate::agent_plan::parse_plan(&outcome.text).map_err(|e| {
+        crate::provider::error::ProviderError::MalformedReply(format!(
+            "{AGENT_REPLY_MALFORMED} 规划器未返回可解析的 JSON: {e}（原文长度 {}）",
+            outcome.text.chars().count()
+        ))
+    })?;
     Ok((parsed, outcome.usage))
 }
 

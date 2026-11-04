@@ -17,6 +17,12 @@ pub enum ProviderError {
     /// Stream broke mid-response; partial content is preserved by the caller.
     StreamInterrupted(String),
     Config(String),
+    /// Model returned text that could not be parsed into the expected JSON
+    /// (planner plan / step action). This is a TRANSIENT model failure, not a
+    /// configuration error: the retry layer treats it as retryable. Carries a
+    /// stable `AGENT_REPLY_MALFORMED` marker so retryability does not depend
+    /// on whatever wording the model happened to use.
+    MalformedReply(String),
 }
 
 impl fmt::Display for ProviderError {
@@ -38,6 +44,7 @@ impl fmt::Display for ProviderError {
                 write!(f, "响应中断，已生成的部分保留在卡片中（{d}）")
             }
             ProviderError::Config(d) => write!(f, "配置错误：{d}"),
+            ProviderError::MalformedReply(d) => write!(f, "模型回复无法解析：{d}"),
         }
     }
 }

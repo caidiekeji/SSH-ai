@@ -237,6 +237,15 @@ struct OpenAiChunkChoice {
 #[derive(serde::Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
+    /// Reasoning models (DeepSeek-R1, QwQ, o1/o3, …) emit the actual answer
+    /// in a reasoning field rather than `content`. Capturing it — but only
+    /// into the parsed text, never into the streamed UI text — prevents the
+    /// planner/step JSON from being lost when such a model is the Agent
+    /// backend (which otherwise surfaces as "未返回可解析的 JSON").
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 #[async_trait]
@@ -316,6 +325,21 @@ impl LLMProvider for OpenAIAdapter {
                 if let Some(c) = chunk.choices.first().and_then(|c| c.delta.content.clone()) {
                     on_chunk(&c);
                     acc.push_str(&c);
+                }
+                // Reasoning models: fold the thinking trace into the parsed
+                // text so a JSON plan hiding inside it is still found.
+                if let Some(r) = chunk
+                    .choices
+                    .first()
+                    .and_then(|c| c.delta.reasoning_content.clone())
+                    .or_else(|| {
+                        chunk
+                            .choices
+                            .first()
+                            .and_then(|c| c.delta.reasoning.clone())
+                    })
+                {
+                    acc.push_str(&r);
                 }
                 if let Some(u) = chunk.usage {
                     *usage_slot = Some(u);
