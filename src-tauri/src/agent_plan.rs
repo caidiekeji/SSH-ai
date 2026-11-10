@@ -126,7 +126,12 @@ pub fn looks_like_description(needle: &str) -> bool {
 fn is_negated_at(output: &str, pos: usize) -> bool {
     let before = &output[..pos];
     let line = before.rsplit('\n').next().unwrap_or(before);
-    let lower = line.trim_end().to_ascii_lowercase();
+    // Normalise trailing whitespace to EXACTLY one space: the negation
+    // markers below all end in a separator. Without this, trimming the line
+    // turns "nginx is not " into "nginx is not" and `ends_with("not ")`
+    // never fires.
+    let mut lower = line.trim_end().to_ascii_lowercase();
+    lower.push(' ');
     const NEGATIONS: [&str; 9] = [
         "not ",
         "no ",
