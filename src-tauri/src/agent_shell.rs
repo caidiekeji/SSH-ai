@@ -6,7 +6,7 @@
 //! Protocol: every command is written as ONE single line:
 //!
 //! ```text
-//! __aisa_cmd='<the user command, single-quoted>'; eval "$__aisa_cmd" < /dev/null; __a=$?; printf '\n\001AISA_RC:%d\002\001AISA_PWD:%s\002\n' "$__a" "$PWD"
+//! __aisa_cmd='<the user command, single-quoted>'; eval "$__aisa_cmd" < /dev/null; __a=$?; printf '\n\001AISA_RC:<nonce>:%d\002\001AISA_PWD:%s\002\n' "$__a" "$PWD"
 //! ```
 //!
 //! Why a single-quoted string instead of a heredoc:
@@ -30,6 +30,11 @@
 //! The reply frame carries the exit code AND the shell's current working
 //! directory (the agent's real cwd — not the stale one probed at connect
 //! time), so the planner can ground itself in reality.
+//!
+//! `<nonce>` is a fresh random per-command token written into the frame by
+//! `wrap_command` and required by `find_sentinel`. A remote command that just
+//! prints a marker-shaped string cannot forge a valid reply (and cannot fake
+//! `exit_code`), because it cannot guess the nonce.
 //!
 //! The handshake marker (`AISA_READY`) is consumed across SSH packet
 //! boundaries — a chunk-local search misses it when the marker is split, and
@@ -94,19 +99,27 @@ pub struct ShellHandle {
 /// The whole wrapper is ONE line: an interactive shell must not have to
 /// buffer a multi-line construct, which is where the command body used to
 /// get lost (the command then ran as an empty string and produced no output).
-pub fn wrap_command(command: &str) -> String {
+///
+/// Returns `(payload, nonce)`: `nonce` is a fresh random token baked into the
+/// reply frame, which the caller must pass to `find_sentinel` so forged frames
+/// (marker-shaped strings printed by the command itself) are rejected.
+pub fn wrap_command(command: &str) -> (String, String) {
+    // Unpredictable per-command token. Hex keeps it safe to embed inside the
+    // printf format string (no `%`, quotes or control bytes).
+    let nonce = format!("{:016x}", rand::random::<u64>());
     // A multi-line command cannot be carried by a single-quoted one-liner.
     let cmd = command.replace(['\r', '\n'], " ");
     let escaped = cmd.replace('\'', "'\\''");
-    format!(
+    let payload = format!(
         "__aisa_cmd='{escaped}'; eval \"$__aisa_cmd\" < /dev/null; __a=$?; \
-         printf '\\n\\001AISA_RC:%d\\002\\001AISA_PWD:%s\\002\\n' \"$__a\" \"$PWD\"\n"
-    )
+         printf '\\n\\001AISA_RC:{nonce}:%d\\002\\001AISA_PWD:%s\\002\\n' \"$__a\" \"$PWD\"\n"
+    );
+    (payload, nonce)
 }
 
 /// Locate the LAST COMPLETE sentinel frame in `buf`.
 ///
-/// The reply frame is `\x01AISA_RC:<code>\x02\x01AISA_PWD:<cwd>\x02`. Both
+/// The reply frame is `\x01AISA_RC:0123456789abcdef:<code>\x02\x01AISA_PWD:<cwd>\x02`. Both
 /// halves must be present: SSH may split them across two data frames, and
 /// truncating at a half-arrived frame would lose the cwd. So the scan only
 /// accepts a head whose ENTIRE frame (code + cwd) is already buffered.
@@ -115,22 +128,38 @@ pub fn wrap_command(command: &str) -> String {
 /// offset at which the frame BEGINS. The caller truncates the buffer THERE,
 /// so the protocol frame never reaches the command payload — leaving it in
 /// corrupts `contains` / `regex` assertions (the payload
-/// "3\n\x01AISA_RC:0\x02…" fails the regex /^[0-9]+$/, because Rust's `$` is
+/// "3\n\x01AISA_RC:0123456789abcdef:0\x02…" fails the regex /^[0-9]+$/, because Rust's `$` is
 /// end-of-text unless the `(?m)` flag is set).
 /// Byte-wise scan so a sentinel split across two SSH data frames still parses.
-fn find_sentinel(buf: &[u8]) -> Option<(i32, Option<String>, usize)> {
+fn find_sentinel(buf: &[u8], nonce: &str) -> Option<(i32, Option<String>, usize)> {
+    // A frame is authentic ONLY if it carries this command's nonce. A remote
+    // command can print a marker-shaped string (e.g. `printf
+    // '\001AISA_RC:0\002...'`) to forge an exit code, but it cannot guess the
+    // random token `wrap_command` baked into the real reply frame. Taking the
+    // LAST frame does not help: the forged one arrives BEFORE the real one.
+    let mut prefix = Vec::with_capacity(nonce.len() + 1);
+    prefix.extend_from_slice(nonce.as_bytes());
+    prefix.push(b':');
     let mut search_from = buf.len();
     while let Some(start) = buf[..search_from]
         .windows(SENTINEL_HEAD.len())
         .rposition(|w| w == SENTINEL_HEAD)
     {
         let rest = &buf[start + SENTINEL_HEAD.len()..];
-        let Some(code_end) = rest.iter().position(|&b| b == SENTINEL_TAIL) else {
-            // Head present but no terminator yet → the frame is still
-            // arriving; wait for more data instead of scanning backwards.
+        if !rest.starts_with(&prefix) {
+            // Forged, stale, or a real frame whose nonce is still arriving:
+            // skip this head (one byte, see below) and keep looking. A partial
+            // real frame will be re-scanned when the next SSH data chunk lands.
+            search_from = start + 1;
+            continue;
+        }
+        let code_body = &rest[prefix.len()..];
+        let Some(code_end) = code_body.iter().position(|&b| b == SENTINEL_TAIL) else {
+            // Authentic head present but no terminator yet → the frame is
+            // still arriving; wait for more data instead of scanning back.
             return None;
         };
-        let parsed = std::str::from_utf8(&rest[..code_end])
+        let parsed = std::str::from_utf8(&code_body[..code_end])
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok());
         let Some(code) = parsed else {
@@ -141,7 +170,7 @@ fn find_sentinel(buf: &[u8]) -> Option<(i32, Option<String>, usize)> {
             search_from = start + 1;
             continue;
         };
-        let after_code = &rest[code_end + 1..];
+        let after_code = &code_body[code_end + 1..];
         if after_code.len() < PWD_HEAD.len() || &after_code[..PWD_HEAD.len()] != PWD_HEAD {
             // This head is not followed by a cwd frame — keep looking for an
             // older complete frame (same one-byte advance rule as above).
@@ -183,6 +212,69 @@ fn find_sentinel(buf: &[u8]) -> Option<(i32, Option<String>, usize)> {
 ///   still be running) must still abort.
 pub fn is_ambiguous_execution(written: bool, exit_code: Option<i32>, timed_out: bool) -> bool {
     written && exit_code.is_none() && !timed_out
+}
+
+/// Strip terminal escape sequences and stray protocol control bytes from the
+/// command payload BEFORE it reaches assertions or the LLM.
+///
+/// Must run AFTER `find_sentinel` has truncated the reply frame: the frame
+/// itself is made of `\x01`/`\x02` bytes. ANSI CSI/OSC sequences and bare
+/// control bytes otherwise corrupt `contains` / `regex` checks and can hide
+/// a forged marker inside the recorded output.
+fn clean_output_bytes(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let b = input[i];
+        if b == 0x1b {
+            i += 1;
+            if i >= input.len() {
+                break;
+            }
+            match input[i] {
+                // CSI: ESC '[' <params> <final byte 0x40..=0x7e>
+                b'[' => {
+                    i += 1;
+                    while i < input.len() {
+                        let c = input[i];
+                        i += 1;
+                        if (0x40..=0x7e).contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: ESC ']' ... BEL | ST (ESC '\')
+                b']' => {
+                    i += 1;
+                    while i < input.len() {
+                        let c = input[i];
+                        i += 1;
+                        if c == 0x07 {
+                            break;
+                        }
+                        if c == 0x1b && i < input.len() && input[i] == b'\\' {
+                            i += 1;
+                            break;
+                        }
+                    }
+                }
+                // Other two-byte ESC sequences.
+                _ => {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // Keep LF/TAB; drop every other C0 control byte (including the
+        // \x01/\x02 sentinel delimiters and CR used by progress repaints).
+        if (b < 0x20 && b != b'\n' && b != b'\t') || b == 0x7f {
+            i += 1;
+            continue;
+        }
+        out.push(b);
+        i += 1;
+    }
+    out
 }
 
 /// Take ownership of a freshly opened `shell` channel and drive it from a
@@ -231,7 +323,7 @@ where
             let mut cancelled = false;
 
             // `data<R: AsyncRead + Unpin>` takes bytes, not an owned buffer.
-            let payload = wrap_command(&command);
+            let (payload, nonce) = wrap_command(&command);
             if c.data(payload.as_bytes()).await.is_err() {
                 shell_gone = true;
             } else {
@@ -268,7 +360,9 @@ where
                                     let tail = out.split_off(out.len() - MAX_OUT);
                                     out = tail;
                                 }
-                                if let Some((code, cwd, frame_start)) = find_sentinel(&out) {
+                                if let Some((code, cwd, frame_start)) =
+                                    find_sentinel(&out, &nonce)
+                                {
                                     // Strip the protocol frame: everything
                                     // from the frame's first byte onwards is
                                     // metadata, not command output. Leaving it
@@ -297,6 +391,10 @@ where
             // frame) and any leftover handshake marker — protocol noise must
             // never reach the command payload.
             let out = strip_ready_mark(&out);
+            // The reply frame has already been truncated above; now strip
+            // ANSI escapes and stray control bytes so assertions see the
+            // command's real output.
+            let out = clean_output_bytes(&out);
             let output = String::from_utf8_lossy(&out)
                 .trim_matches('\n')
                 .to_string();
@@ -328,6 +426,12 @@ where
             // Timeout / death / cancellation poisons this channel: drop it so
             // the caller re-opens fresh instead of writing into a stuck stream.
             if timed_out || shell_gone {
+                // Dropping the local handle alone leaves the remote foreground
+                // process running (tail -f, read, an installer...). Close the
+                // SSH channel explicitly so the host tears it down.
+                if let Some(stale) = ch.as_ref() {
+                    let _ = stale.close().await;
+                }
                 ch = None;
                 last_cwd = None;
             }
@@ -414,13 +518,28 @@ fn strip_ready_mark(buf: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Fixed nonce for hand-built frames in these tests.
+    const TEST_NONCE: &str = "0123456789abcdef";
+
     #[test]
     fn wrap_contains_protocol() {
-        let w = wrap_command("ls -la");
+        let (w, nonce) = wrap_command("ls -la");
         assert!(w.contains("eval \"$__aisa_cmd\" < /dev/null"));
         assert!(w.contains("__a=$?"));
-        assert!(w.contains("AISA_RC:%d"));
+        assert!(w.contains("AISA_RC:"));
+        assert!(w.contains(":%d"));
         assert!(w.contains("AISA_PWD:%s"));
+        // The nonce is baked into the printf format AND returned separately,
+        // so the driver can validate the reply frame.
+        assert!(w.contains(&format!("AISA_RC:{nonce}:%d")));
+        assert_eq!(nonce.len(), 16);
+    }
+
+    #[test]
+    fn wrap_nonce_is_per_command() {
+        let (_, a) = wrap_command("echo hi");
+        let (_, b) = wrap_command("echo hi");
+        assert_ne!(a, b, "a fresh nonce is required for every command");
     }
 
     #[test]
@@ -429,7 +548,7 @@ mod tests {
         // multi-line construct — that is exactly where the command body used
         // to get lost (the command then ran as an empty string and produced
         // no output, surfacing as a bogus assertion failure).
-        let w = wrap_command("echo hi");
+        let (w, _) = wrap_command("echo hi");
         assert_eq!(w.matches('\n').count(), 1, "wrapper must be one line");
         assert!(w.starts_with("__aisa_cmd='echo hi';"));
         assert!(w.ends_with('\n'));
@@ -439,21 +558,21 @@ mod tests {
     fn wrap_quotes_the_command() {
         // The command lands inside single quotes: the remote parser never
         // sees it as code.
-        let w = wrap_command("echo hi");
+        let (w, _) = wrap_command("echo hi");
         assert!(w.contains("__aisa_cmd='echo hi';"));
     }
 
     #[test]
     fn wrap_escapes_single_quote() {
         // A literal ' inside the command must not break out of the quoting.
-        let w = wrap_command("echo \"it's\"");
+        let (w, _) = wrap_command("echo \"it's\"");
         assert!(w.contains("__aisa_cmd='echo \"it'\\''s\"';"));
     }
 
     #[test]
     fn wrap_flattens_newlines() {
         // A multi-line command cannot travel inside a one-liner.
-        let w = wrap_command("for i in 1 2; do\n  echo $i\ndone");
+        let (w, _) = wrap_command("for i in 1 2; do\n  echo $i\ndone");
         assert_eq!(w.matches('\n').count(), 1, "wrapper must stay one line");
         assert!(w.contains("for i in 1 2; do"));
         assert!(w.contains("echo $i"));
@@ -464,7 +583,7 @@ mod tests {
     fn wrap_comment_cannot_eat_protocol() {
         // A `#` inside the command must not comment out the protocol lines:
         // the single-quoted string keeps it verbatim.
-        let w = wrap_command("echo hi # rm -rf /");
+        let (w, _) = wrap_command("echo hi # rm -rf /");
         assert!(w.contains("echo hi # rm -rf /"));
         assert!(w.contains("printf '\\n\\001AISA_RC"));
     }
@@ -482,8 +601,8 @@ mod tests {
 
     #[test]
     fn sentinel_roundtrip() {
-        let buf = b"some output\n\x01AISA_RC:0\x02\x01AISA_PWD:/root\x02\n";
-        let (code, cwd, frame_start) = find_sentinel(buf).expect("sentinel found");
+        let buf = b"some output\n\x01AISA_RC:0123456789abcdef:0\x02\x01AISA_PWD:/root\x02\n";
+        let (code, cwd, frame_start) = find_sentinel(buf, TEST_NONCE).expect("sentinel found");
         assert_eq!(code, 0);
         assert_eq!(cwd.as_deref(), Some("/root"));
         // The frame starts right after the command output.
@@ -492,8 +611,8 @@ mod tests {
 
     #[test]
     fn sentinel_with_cwd() {
-        let buf = b"out\n\x01AISA_RC:0\x02\x01AISA_PWD:/var/log\x02\n";
-        let (code, cwd, frame_start) = find_sentinel(buf).expect("sentinel found");
+        let buf = b"out\n\x01AISA_RC:0123456789abcdef:0\x02\x01AISA_PWD:/var/log\x02\n";
+        let (code, cwd, frame_start) = find_sentinel(buf, TEST_NONCE).expect("sentinel found");
         assert_eq!(code, 0);
         assert_eq!(cwd.as_deref(), Some("/var/log"));
         assert_eq!(&buf[..frame_start], b"out\n");
@@ -503,16 +622,16 @@ mod tests {
     fn incomplete_frame_is_not_accepted() {
         // The cwd frame has not arrived yet — the caller must keep reading
         // instead of truncating at a half-frame (which would lose the cwd).
-        let buf = b"out\n\x01AISA_RC:0\x02\x01AISA_PWD:/var";
-        assert!(find_sentinel(buf).is_none());
+        let buf = b"out\n\x01AISA_RC:0123456789abcdef:0\x02\x01AISA_PWD:/var";
+        assert!(find_sentinel(buf, TEST_NONCE).is_none());
     }
 
     #[test]
     fn sentinel_nonzero_and_last_wins() {
         // Two frames (e.g. a program echoing the marker pattern + real one):
         // the LAST is authoritative.
-        let buf = b"\x01AISA_RC:7\x02\x01AISA_PWD:/\x02\nreal out\x01AISA_RC:42\x02\x01AISA_PWD:/tmp\x02\n";
-        let (code, cwd, _) = find_sentinel(buf).expect("found");
+        let buf = b"\x01AISA_RC:0123456789abcdef:7\x02\x01AISA_PWD:/\x02\nreal out\x01AISA_RC:0123456789abcdef:42\x02\x01AISA_PWD:/tmp\x02\n";
+        let (code, cwd, _) = find_sentinel(buf, TEST_NONCE).expect("found");
         assert_eq!(code, 42);
         assert_eq!(cwd.as_deref(), Some("/tmp"));
     }
@@ -523,9 +642,9 @@ mod tests {
         // accumulated buffer must still parse once the tail arrives.
         let mut acc: Vec<u8> = Vec::new();
         acc.extend_from_slice(b"out\n\x01AIS");
-        assert!(find_sentinel(&acc).is_none());
-        acc.extend_from_slice(b"A_RC:3\x02\x01AISA_PWD:/etc\x02\n");
-        let (code, cwd, frame_start) = find_sentinel(&acc).expect("after tail");
+        assert!(find_sentinel(&acc, TEST_NONCE).is_none());
+        acc.extend_from_slice(b"A_RC:0123456789abcdef:3\x02\x01AISA_PWD:/etc\x02\n");
+        let (code, cwd, frame_start) = find_sentinel(&acc, TEST_NONCE).expect("after tail");
         assert_eq!(code, 3);
         assert_eq!(cwd.as_deref(), Some("/etc"));
         assert_eq!(&acc[..frame_start], b"out\n");
@@ -535,11 +654,11 @@ mod tests {
     fn payload_never_contains_the_sentinel_frame() {
         // Regression (user-visible): the reply frame is PROTOCOL metadata and
         // must never reach the command payload. Leaving it in corrupted the
-        // assertions — the payload "3\n\x01AISA_RC:0\x02\x01AISA_PWD:/h\x02"
+        // assertions — the payload "3\n\x01AISA_RC:0123456789abcdef:0\x02\x01AISA_PWD:/h\x02"
         // fails the regex /^[0-9]+$/ (Rust's `$` is end-of-text without the
         // `(?m)` flag) and "输出包含 docker" failed for the same reason.
-        let buf = b"3\n\x01AISA_RC:0\x02\x01AISA_PWD:/home/jie\x02\n";
-        let (code, cwd, frame_start) = find_sentinel(buf).expect("sentinel found");
+        let buf = b"3\n\x01AISA_RC:0123456789abcdef:0\x02\x01AISA_PWD:/home/jie\x02\n";
+        let (code, cwd, frame_start) = find_sentinel(buf, TEST_NONCE).expect("sentinel found");
         assert_eq!(code, 0);
         assert_eq!(cwd.as_deref(), Some("/home/jie"));
         let payload = &buf[..frame_start];
@@ -555,8 +674,8 @@ mod tests {
         // stripped, "3" must satisfy the plan assertion /^[0-9]+$/, while the
         // old (polluted) payload must NOT.
         use regex::Regex;
-        let buf = b"3\n\x01AISA_RC:0\x02\x01AISA_PWD:/home/jie\x02\n";
-        let (_, _, frame_start) = find_sentinel(buf).expect("sentinel found");
+        let buf = b"3\n\x01AISA_RC:0123456789abcdef:0\x02\x01AISA_PWD:/home/jie\x02\n";
+        let (_, _, frame_start) = find_sentinel(buf, TEST_NONCE).expect("sentinel found");
         let payload = String::from_utf8_lossy(&buf[..frame_start])
             .trim_matches('\n')
             .to_string();
@@ -571,15 +690,42 @@ mod tests {
 
     #[test]
     fn sentinel_absent_or_garbage_is_none() {
-        assert!(find_sentinel(b"plain output").is_none());
-        assert!(find_sentinel(b"\x01AISA_RC:notanumber\x02").is_none());
+        assert!(find_sentinel(b"plain output", TEST_NONCE).is_none());
+        assert!(find_sentinel(b"\x01AISA_RC:0123456789abcdef:notanumber\x02", TEST_NONCE).is_none());
+        // Right shape, WRONG nonce → forged frame, must not be accepted.
+        assert!(find_sentinel(b"\x01AISA_RC:0\x02\x01AISA_PWD:/\x02", TEST_NONCE).is_none());
+    }
+
+    #[test]
+    fn forged_sentinel_cannot_fake_exit_code() {
+        // Security regression: a command prints a perfectly shaped marker
+        // with exit code 0 BEFORE the real frame (which says 42) arrives.
+        // Without the nonce, the driver stopped reading at the forged frame
+        // and reported success — making `exit_code: 0` assertions trivial to
+        // fake from the remote side.
+        let forged = b"owned\n\x01AISA_RC:0\x02\x01AISA_PWD:/tmp\x02\n";
+        assert!(
+            find_sentinel(forged, TEST_NONCE).is_none(),
+            "a frame without this command's nonce must be ignored"
+        );
+        let mut acc = forged.to_vec();
+        acc.extend_from_slice(b"\x01AISA_RC:0123456789abcdef:42\x02\x01AISA_PWD:/tmp\x02\n");
+        let (code, _, _) = find_sentinel(&acc, TEST_NONCE).expect("real frame wins");
+        assert_eq!(code, 42);
+    }
+
+    #[test]
+    fn clean_output_strips_ansi_and_control_bytes() {
+        let raw = b"hello\x1b[31m world\x1b[0m\r\n\x01\x02tail\n";
+        let cleaned = clean_output_bytes(raw);
+        assert_eq!(String::from_utf8_lossy(&cleaned), "hello world\ntail\n");
     }
 
     #[test]
     fn control_bytes_never_in_normal_text() {
         // The sentinel relies on \x01/\x02 not appearing in program output —
         // sanity: wrap_command emits them only inside printf escapes.
-        let w = wrap_command("echo hi");
+        let (w, _) = wrap_command("echo hi");
         assert!(!w.contains('\u{1}'));
         assert!(w.contains("\\001"));
     }

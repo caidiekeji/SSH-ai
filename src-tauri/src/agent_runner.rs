@@ -464,7 +464,7 @@ pub async fn run_agent_task(
     let mut executed: Vec<AgentStepIn> = Vec::new();
     let mut acceptance_state = AcceptanceState {
         passed_step_ids: HashSet::new(),
-        reactive_verified: false,
+        reactive_passed_ids: HashSet::new(),
         last_pass_at: -1,
         last_fail_at: -1,
     };
@@ -476,7 +476,11 @@ pub async fn run_agent_task(
                 (
                     s.id,
                     s.required,
-                    agent_policy::is_assertive(Some(&s.expect)),
+                    // Only a step with a POSITIVE output assertion can be an
+                    // acceptance criterion. `{"required":true,"command":
+                    // "true","expect":{"exit_code":0}}` used to slip through
+                    // and mark the whole task Done without checking anything.
+                    agent_policy::is_goal_assertive(Some(&s.expect)),
                 )
             })
             .collect::<Vec<_>>(),
@@ -485,11 +489,17 @@ pub async fn run_agent_task(
     // verification only counts as goal evidence when it re-runs one of
     // these (see `verify_is_goal_evidence`) — this is what stops the model
     // from laundering a failed run with `true` + `expect:{exit_code:0}`.
-    let acceptance_commands: Vec<String> = plan
+    // Keep the step id alongside the command so a re-check can credit ONLY
+    // the criterion it actually re-proved.
+    let acceptance_pairs: Vec<(u32, String)> = plan
         .steps
         .iter()
         .filter(|s| acceptance_ids.contains(&s.id))
-        .map(|s| s.command.clone())
+        .map(|s| (s.id, s.command.clone()))
+        .collect();
+    let acceptance_commands: Vec<String> = acceptance_pairs
+        .iter()
+        .map(|(_, c)| c.clone())
         .collect();
 
     // ---- Phase 1: execute the Planner's plan, respecting depends_on ----
@@ -557,7 +567,7 @@ pub async fn run_agent_task(
             &ctx,
             &mut plan_approved,
             &approved_commands,
-            &acceptance_commands,
+            &acceptance_pairs,
             Action {
                 command: plan_step.command.clone(),
                 expect: Some(plan_step.expect.clone()),
@@ -604,7 +614,19 @@ pub async fn run_agent_task(
             ActionOutcome::Ok { ok, verified } => {
                 if ok {
                     done_ids.insert(plan_step.id);
-                    if verified == Some(true) && acceptance_ids.contains(&plan_step.id) {
+                    // Phase 1 used to accept ANY verified==true on a required
+                    // step, bypassing verify_is_goal_evidence entirely. Now
+                    // the plan's own spec must carry a positive output
+                    // assertion and the command must be one of the promised
+                    // acceptance commands.
+                    if verified == Some(true)
+                        && acceptance_ids.contains(&plan_step.id)
+                        && agent_policy::verify_is_goal_evidence(
+                            Some(&plan_step.expect),
+                            &plan_step.command,
+                            &acceptance_commands,
+                        )
+                    {
                         acceptance_state.passed_step_ids.insert(plan_step.id);
                     }
                 } else {
@@ -705,8 +727,13 @@ pub async fn run_agent_task(
                 if let Some(u) = u {
                     snapshot.usage = Some(match snapshot.usage {
                         Some(prev) => Usage {
-                            prompt_tokens: prev.prompt_tokens + u.prompt_tokens,
-                            completion_tokens: prev.completion_tokens + u.completion_tokens,
+                            // Saturate, never wrap: a u32 overflow used to
+                            // wrap the counter back to a small value and
+                            // silently disable the MAX_TOKENS budget.
+                            prompt_tokens: prev.prompt_tokens.saturating_add(u.prompt_tokens),
+                            completion_tokens: prev
+                                .completion_tokens
+                                .saturating_add(u.completion_tokens),
                         },
                         None => u,
                     });
@@ -799,7 +826,7 @@ pub async fn run_agent_task(
                 &ctx,
                 &mut plan_approved,
                 &approved_commands,
-                &acceptance_commands,
+                &acceptance_pairs,
                 Action {
                     command: out.keys.clone().unwrap_or_default(),
                     expect: None,
@@ -880,7 +907,7 @@ pub async fn run_agent_task(
             &ctx,
             &mut plan_approved,
             &approved_commands,
-            &acceptance_commands,
+            &acceptance_pairs,
             Action {
                 command: out.command.clone().unwrap_or_default(),
                 expect: spec,
@@ -1050,7 +1077,7 @@ async fn run_action(
     ctx: &RunContext,
     plan_approved: &mut bool,
     approved_commands: &HashSet<String>,
-    acceptance_commands: &[String],
+    acceptance_pairs: &[(u32, String)],
     action: Action,
 ) -> ActionOutcome {
     *step_no += 1;
@@ -1178,9 +1205,14 @@ async fn run_action(
                 output: reason.clone(),
                 risk: level.as_str().to_string(),
                 kind: action.kind.as_str().to_string(),
-                verified: Some(true),
+                // A SKIP executes nothing, so it must not manufacture a
+                // passing assertion or an exit code. The old code wrote
+                // verified:Some(true)/exit_code:Some(0) here, which was a
+                // brand-new way to launder acceptance evidence without ever
+                // touching the remote host.
+                verified: None,
                 verify_failures: None,
-                exit_code: Some(0),
+                exit_code: None,
             });
             executed.push(AgentStepIn {
                 command: action.command.clone(),
@@ -1188,22 +1220,20 @@ async fn run_action(
                 kind: action.kind.as_str().to_string(),
                 description: action.description.clone(),
                 expect: action.expect_text.clone().unwrap_or_default(),
-                verified: Some(true),
-                exit_code: Some(0),
+                verified: None,
+                exit_code: None,
                 failures: vec![],
             });
             snapshot.memory.facts.push(format!(
-                "{} → 断言通过（本次跳过重复执行，复用先前结果）",
+                "{} → 跳过重复执行（复用先前输出，本次未产生新证据）",
                 action.command
             ));
-            // The skipped step still counts as a fresh passing verification:
-            // the acceptance rule compares last_pass_at against last_fail_at,
-            // and this step is the newest evidence.
-            acceptance_state.last_pass_at = this_step as i64;
+            // Deliberately NOT touching last_pass_at / passed_step_ids: a
+            // skipped step proves nothing new about the goal.
             publish(app, run, snapshot);
             return ActionOutcome::Ok {
                 ok: true,
-                verified: Some(true),
+                verified: None,
             };
         }
     }
@@ -1366,7 +1396,14 @@ async fn run_action(
         verify_failures = outcome.failures;
         if outcome.passed {
             *verified_count += 1;
-            acceptance_state.last_pass_at = this_step as i64;
+            // Freshness must not be revived by an UNRELATED passing Verify
+            // step: any `echo ok` + `contains:["ok"]` used to reset
+            // last_pass_at and resurrect stale acceptance evidence. Exec
+            // steps really changed the host, so they still count; Verify
+            // steps refresh freshness only in the goal-evidence block below.
+            if action.kind != StepKind::Verify {
+                acceptance_state.last_pass_at = this_step as i64;
+            }
             snapshot.memory.facts.push(format!(
                 "{} → 断言通过",
                 if action.description.trim().is_empty() {
@@ -1431,11 +1468,10 @@ async fn run_action(
             Some(spec) if has_expect => agent_policy::describe_expect(spec),
             _ => action.expect_text.clone().unwrap_or_default(),
         },
-        verified: if action.kind == StepKind::Verify {
-            verified
-        } else {
-            None
-        },
+        // Record the REAL verification result for Exec steps too. It used to
+        // be hard-coded to None, which made `check_idempotent` dead code:
+        // `prior` only sees Exec entries and could never find a passing one.
+        verified,
         exit_code,
         // Feed the WHY back: without the reason, the model only sees
         // "assertion failed" and thrashes on new commands instead of
@@ -1477,15 +1513,28 @@ async fn run_action(
     // check is satisfied by `true`), and when the plan defined acceptance
     // steps the command must be one of them. Anything else must never
     // satisfy the acceptance gate.
-    if action.kind == StepKind::Verify
-        && verified == Some(true)
-        && agent_policy::verify_is_goal_evidence(
+    if action.kind == StepKind::Verify && verified == Some(true) {
+        let promised: Vec<String> = acceptance_pairs
+            .iter()
+            .map(|(_, c)| c.clone())
+            .collect();
+        if agent_policy::verify_is_goal_evidence(
             action.expect.as_ref(),
             &action.command,
-            acceptance_commands,
-        )
-    {
-        acceptance_state.reactive_verified = true;
+            &promised,
+        ) {
+            // Credit ONLY the criterion this verification re-proved. A single
+            // bool used to short-circuit the entire gate, laundering every
+            // other required step (and never resetting after a later failure).
+            if let Some((id, _)) = acceptance_pairs
+                .iter()
+                .find(|(_, c)| c.trim() == action.command.trim())
+            {
+                acceptance_state.reactive_passed_ids.insert(*id);
+                // Freshness is refreshed ONLY by real goal evidence.
+                acceptance_state.last_pass_at = this_step as i64;
+            }
+        }
     }
     publish(app, run, snapshot);
     ActionOutcome::Ok { ok, verified }

@@ -118,6 +118,59 @@ pub fn looks_like_description(needle: &str) -> bool {
     MARKERS.iter().any(|m| n.contains(m))
 }
 
+/// Is `needle` preceded by a negation on the same line?
+///
+/// `contains: ["running"]` must NOT be satisfied by "nginx is not running".
+/// Combined with the word-boundary rule in `contains_needle`, this closes the
+/// two classic false-positive shapes of a substring assertion.
+fn is_negated_at(output: &str, pos: usize) -> bool {
+    let before = &output[..pos];
+    let line = before.rsplit('\n').next().unwrap_or(before);
+    let lower = line.trim_end().to_ascii_lowercase();
+    const NEGATIONS: [&str; 9] = [
+        "not ",
+        "no ",
+        "never ",
+        "isn't ",
+        "is not ",
+        "isn t ",
+        "disabled: ",
+        "false: ",
+        "none: ",
+    ];
+    NEGATIONS.iter().any(|n| lower.ends_with(n))
+}
+
+/// Word-boundary aware `contains`.
+///
+/// A bare `str::contains` accepts `"inactive"` for the needle `"active"` and
+/// `"not running"` for `"running"` — so `systemctl is-active nginx` could
+/// "prove" a stopped service is running and the acceptance gate reported a
+/// false Done. ASCII word-like needles are matched on word boundaries and
+/// inside negated phrases are rejected. Needles with spaces, punctuation or
+/// non-ASCII characters keep plain substring semantics (CJK has no word
+/// boundaries and phrases are meant to match verbatim).
+pub fn contains_needle(output: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let boundary_aware = needle
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !boundary_aware {
+        return output.contains(needle);
+    }
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    output.match_indices(needle).any(|(i, m)| {
+        let before = output[..i].chars().next_back();
+        let after = output[i + m.len()..].chars().next();
+        if before.is_some_and(is_word) || after.is_some_and(is_word) {
+            return false;
+        }
+        !is_negated_at(output, i)
+    })
+}
+
 /// Evaluate an expectation against a command result. Pure and deterministic:
 /// the same (spec, exit code, output) always yields the same outcome.
 pub fn verify_expectation(
@@ -162,7 +215,7 @@ pub fn verify_expectation(
             ));
             continue;
         }
-        if !output.contains(needle) {
+        if !contains_needle(output, needle) {
             failures.push(format!("输出中未找到预期内容「{needle}」"));
         }
     }
@@ -173,7 +226,7 @@ pub fn verify_expectation(
             continue;
         }
         checked += 1;
-        if output.contains(needle) {
+        if contains_needle(output, needle) {
             failures.push(format!("输出中出现了不应出现的内容「{needle}」"));
         }
     }
@@ -512,15 +565,31 @@ mod tests {
 
     #[test]
     fn missing_contains_fails() {
-        // Output must contain the needle as a substring; "running" is absent
-        // from "stopped", so the step must fail. (We avoid "inactive"/"active"
-        // here on purpose: `str::contains` matches the *substring* "active"
-        // inside "inactive", which is the intended behaviour — see the plan
-        // parser test that combines `contains` + `not_contains` to disambiguate.)
         let s = spec(None, &["running"], &[], None);
         let o = verify_expectation(&s, Some(0), "stopped");
         assert!(!o.passed);
         assert!(o.failures[0].contains("running"));
+    }
+
+    #[test]
+    fn substring_inside_a_longer_word_does_not_pass() {
+        // Security regression: `systemctl is-active nginx` prints "inactive"
+        // when the service is STOPPED. A bare `contains("active")` used to
+        // accept it and the acceptance gate reported a false Done.
+        let s = spec(None, &["active"], &[], None);
+        assert!(!verify_expectation(&s, Some(0), "inactive").passed);
+        assert!(!verify_expectation(&s, Some(0), "nonactive").passed);
+        // A genuine whole-word hit still passes.
+        assert!(verify_expectation(&s, Some(0), "active\n").passed);
+        assert!(verify_expectation(&s, Some(0), "active (running)").passed);
+    }
+
+    #[test]
+    fn negated_phrase_does_not_pass() {
+        let s = spec(None, &["running"], &[], None);
+        assert!(!verify_expectation(&s, Some(0), "nginx is not running").passed);
+        assert!(!verify_expectation(&s, Some(0), "service: never running").passed);
+        assert!(verify_expectation(&s, Some(0), "nginx is running").passed);
     }
 
     #[test]

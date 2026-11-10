@@ -102,6 +102,29 @@ fn blacklist() -> &'static Vec<Rule> {
                 r"(history\s+-c|shred\s+/|wipefs\s+)",
                 "清除历史/擦除磁盘签名",
             ),
+            // ---- 命令包装器 / 执行结构：只读白名单前缀不能再为其背书 ----
+            // 这些结构即便藏在引号里也代表「执行代码」，命中即红，且
+            // 不可被用户白名单降级（blacklist 在白名单之前判定）。
+            mk(
+                "shell-exec-wrapper",
+                r#"(^|[\s;|&'"(])((sh|bash|zsh|dash|ksh)\s+-c\b|eval\b|exec\b|source\b|alias\b|sudo\b|su\s+-)"#,
+                "命令包装器 / 代码执行入口（sh -c、bash -c、eval、exec、source、alias、sudo、su -）",
+            ),
+            mk(
+                "env-shell-wrapper",
+                r"(^|[;|&])\s*env\s+(-\S+\s+)*(\S*/)?(sh|bash|zsh|dash|ksh)\b",
+                "env 包装 shell 执行命令（env sh -c '…'）",
+            ),
+            mk(
+                "command-substitution",
+                r"\$\(|`|<\(|>\(",
+                "命令替换 $() / 反引号 / 进程替换",
+            ),
+            mk(
+                "write-sys-path",
+                r"(^|[\s;|&])(--?output(?:-document)?|-o|-O|-fprint0?|-fprintf|tee)\s+/(etc|boot|usr/lib|root/\.ssh|proc/sys)\b",
+                "通过输出参数（-o / -fprintf / tee …）写入系统关键路径",
+            ),
         ]
     })
 }
@@ -184,11 +207,19 @@ fn read_rules() -> &'static Vec<Rule> {
             reason: "只读命令",
         };
         // PRD §5.5 第三层：只读白名单（命中即绿，仍需用户按 Enter）
+        // 安全收紧：把「能执行代码 / 写文件 / 读敏感凭据」的词从字符组里
+        // 逐个摘除（不删整条正则，避免误伤同一行其它只读命令）：
+        //   less/more(! 可执行 shell)、env/printenv(可读凭据且作命令包装器)、
+        //   find(-fprintf/-exec 可写/执行)、curl/wget(-o/-O 可写任意文件)。
+        // 保留的均为真正只读且参数受限的命令。
         vec![
-            mk(r"^(ls|cat|head|tail|less|more|df|du|free|uptime|whoami|hostname|date|which|whereis|env|printenv|id)\b"),
-            mk(r"^(grep|egrep|fgrep|zgrep|find|stat|file|wc|sort|uniq|diff|journalctl|dmesg)\b"),
-            mk(r"^(ps|ss|netstat|lsof|ifconfig|ip\s+(a|addr|link|route)\b|ping|dig|host|curl\s+(-I|--head)|wget\s+--spider)"),
+            mk(r"^(ls|cat|head|tail|df|du|free|uptime|whoami|hostname|date|which|whereis|id)\b"),
+            mk(r"^(grep|egrep|fgrep|zgrep|stat|file|wc|sort|uniq|diff|journalctl|dmesg)\b"),
+            mk(r"^(ps|ss|netstat|lsof|ifconfig|ip\s+(a|addr|link|route)\b|ping|dig|host)"),
             mk(r"^systemctl\s+(status|list-unit|list-dependencies|is-active|is-enabled|show)\b"),
+            // docker/kubectl 仅保留明确只读的子命令（docker ps 之类）。
+            // 带写操作 / 元字符 / -o 输出到系统路径的形态由 blacklist
+            // 与 green_veto 拦截，不会经由本行判绿。
             mk(r"^(docker\s+(ps|logs|inspect|images|info|version)|kubectl\s+(get|describe|logs|top)\b)"),
             mk(r"^(apt(-get)?\s+(list|search|show|showpkg)\b|yum\s+(list|search|info)\b|dnf\s+(list|search|info)\b|pip\s+(list|show|search)\b|npm\s+(list|ls|search|info|view)\b)"),
             mk(r"^(echo|printf)\b[^>]*$"),
@@ -205,9 +236,11 @@ fn read_rules() -> &'static Vec<Rule> {
             // Shell test(1) / `[ … ]` bracket test — comparison only,
             // cannot write. `test` needs no closing bracket; `[` does.
             mk(r"^test\b|^\[.*\]$"),
-            // awk is powerful enough to run commands — allowed only when the
-            // script shows no dangerous feature (see `awk_dangerous`), which
-            // the caller checks before consulting this whitelist.
+            // awk 能执行代码，但「纯文本处理」是内置仪表盘探针
+            // (dashboard_probe_is_green) 依赖的只读能力，故保留 GREEN。
+            // 由 awk_dangerous + green_veto 双重守卫：脚本里出现
+            // system() / 管道 / 重定向 / 命令替换一律不判绿。若主任务
+            // 后续改造掉探针，可把本行整条摘除。
             mk(r"^awk\b"),
         ]
     })
@@ -255,6 +288,49 @@ fn awk_dangerous(cmd: &str) -> bool {
     let re = PRINT_GT
         .get_or_init(|| Regex::new(r"(print|printf)[^;}]*>").expect("valid print-redirect regex"));
     re.is_match(cmd)
+}
+
+/// 结构性否决（PRD §5.5 第三层的前置闸）：在把某个段判为 GREEN 之前，
+/// 对段的**完整原文**再查一次。split_segments 只切引号外的 `;` `|` `&`
+/// 和换行，引号内藏的 `|` / `>` / `$()` / 反引号 / 命令包装器仍留在段
+/// 里，正是 `env sh -c 'a | chpasswd'` 这类绕过的入口。
+///
+/// 只否决真正代表「执行 / 写 / 命令链」的结构，不无脑否决全部 shell
+/// 标点：awk 探针脚本里本就有引号内的 `;` `&&` `\`（awk 语法，非
+/// shell），`ls 'a;b.txt'` 这类带标点的文件名也必须保持 GREEN。
+/// 命中即禁止走只读白名单，落到默认 YELLOW；更严重的结构由 blacklist
+/// 在整条命令上直接判 RED。
+fn green_veto(seg: &str) -> bool {
+    // (1) 执行结构：命令替换 / 进程替换 / 反引号，引号内同样危险。
+    if seg.contains("$(")
+        || seg.contains('`')
+        || seg.contains("<(")
+        || seg.contains(">(")
+    {
+        return true;
+    }
+    // (2) 命令包装器 / 代码执行入口（与 blacklist 的 shell-exec-wrapper
+    //     同一套模式，这里用于「未达 RED 但也不许 GREEN」的兜底）。
+    static WRAPPER: OnceLock<Regex> = OnceLock::new();
+    let wrapper = WRAPPER.get_or_init(|| {
+        Regex::new(
+            r#"(^|[\s;|&'"(])((sh|bash|zsh|dash|ksh)\s+-c\b|eval\b|exec\b|source\b|alias\b|sudo\b|su\s+-)"#,
+        )
+        .expect("valid green-veto wrapper regex")
+    });
+    if wrapper.is_match(seg) {
+        return true;
+    }
+    // (3) 引号内残留的管道 / 重定向：段里还留着 `|` 或 `>`，说明它们在
+    //     引号内（引号外的已被 split_segments 切走）。纯 sink 重定向
+    //     （>/dev/null、2>&1）无副作用，沿用 redirect_only_sinks 豁免。
+    if seg.contains('|') {
+        return true;
+    }
+    if seg.contains('>') && !redirect_only_sinks(seg) {
+        return true;
+    }
+    false
 }
 
 /// User whitelist: EXACT string match only. Never overrides the blacklist
@@ -434,6 +510,17 @@ impl RiskEngine {
             }
         }
 
+        // Layer 2.5: 统一结构性否决 —— 判 GREEN 前的最后一道闸。
+        // 复用 split_segments 之后的「单段」视角，但检查的是段的完整
+        // 原文（含引号内），补齐 split_segments 只看引号外的盲区。
+        if green_veto(cmd) {
+            return RiskAssessment {
+                level: RiskLevel::Yellow,
+                rule: "structural-veto".into(),
+                reason: "命令含 shell 结构或命令包装器，不允许按只读白名单自动执行".into(),
+            };
+        }
+
         // Layer 3: read-only whitelist (GREEN). find(1) is only read-only
         // WITHOUT -delete / -exec; guard it. awk can run arbitrary commands
         // (system()/getline/redirects/pipes) — guard it the same way.
@@ -547,6 +634,10 @@ mod tests {
         assert_eq!(b.level, RiskLevel::Red);
     }
 
+    // 注：原用例曾断言 `find /var/log -name '*.log'` 为 GREEN。安全收紧后
+    // find 已从只读白名单移除（find -fprintf/-exec 可写文件或执行代码），
+    // 该命令现按默认 YELLOW 处理，故从 GREEN 列表移除；对应断言见
+    // removed_whitelist_commands_not_green。
     #[test]
     fn green_read_only() {
         for cmd in [
@@ -557,7 +648,6 @@ mod tests {
             "ps aux",
             "ss -tlnp",
             "grep error /var/log/app.log",
-            "find /var/log -name '*.log'",
             "systemctl status nginx",
             "journalctl -u nginx --since today",
             "docker ps -a",
@@ -835,5 +925,97 @@ mod tests {
             let a = grade(cmd, "read");
             assert_ne!(a.level, RiskLevel::Green, "expected >=YELLOW for: {cmd}");
         }
+    }
+
+    // ---- GREEN 白名单绕过向量（安全回归） ----
+
+    #[test]
+    fn green_bypass_vectors_not_green() {
+        // 这些形态过去都因「命令首单词前缀命中只读白名单」被误判为
+        // GREEN 并在 agent_auto_green 下自动执行，必须一律不得为 GREEN。
+        for cmd in [
+            r"env sh -c 'id'",
+            r"find /tmp -fprintf /etc/cron.d/pwn '%p\n'",
+            r"curl -I -o /etc/cron.d/pwn http://x",
+            "ls | sh",
+            "cat /etc/shadow > /tmp/x",
+            "echo $(id)",
+        ] {
+            let a = grade(cmd, "read");
+            assert_ne!(
+                a.level,
+                RiskLevel::Green,
+                "不得判 GREEN（rule={}）: {}",
+                a.rule,
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn high_risk_structures_are_red() {
+        // 命令包装器 / 命令替换 / 进程替换 / 隐蔽写系统路径：命中即 RED，
+        // 且不可被用户白名单降级。
+        for cmd in [
+            r"env sh -c 'id'",
+            r"bash -c 'id'",
+            r"sudo cat /etc/shadow",
+            r"eval 'id'",
+            r"echo `id`",
+            r"echo $(id)",
+            r"cat <(id)",
+            r"find /tmp -fprintf /etc/cron.d/pwn '%p\n'",
+            r"curl -I -o /etc/cron.d/pwn http://x",
+            r"echo x | tee /etc/cron.d/pwn",
+        ] {
+            let a = grade(cmd, "read");
+            assert_eq!(
+                a.level,
+                RiskLevel::Red,
+                "expected RED for: {} (rule={})",
+                cmd,
+                a.rule
+            );
+        }
+    }
+
+    #[test]
+    fn removed_whitelist_commands_not_green() {
+        // 从 GREEN 白名单摘除的词：不再能凭首单词前缀自动执行。
+        for cmd in [
+            "env",
+            "printenv",
+            "find /var/log -name '*.log'",
+            "less /etc/passwd",
+            "more /etc/passwd",
+            "curl -I http://x",
+            "wget --spider http://x",
+            "xargs rm",
+            "install foo /usr/bin/foo",
+            "awk 'BEGIN{system(\"id\")}'",
+        ] {
+            let a = grade(cmd, "read");
+            assert_ne!(
+                a.level,
+                RiskLevel::Green,
+                "已从白名单移除，不得判 GREEN（rule={}）: {}",
+                a.rule,
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn plain_readonly_still_green() {
+        // 收紧白名单不能误伤真正只读的基础命令（正向回归）。
+        assert_eq!(grade("ls -la", "").level, RiskLevel::Green);
+        assert_eq!(grade("df -h", "").level, RiskLevel::Green);
+    }
+
+    #[test]
+    fn literal_output_not_misflagged() {
+        // 单引号里的纯字面变量（echo '$HOME'）不含命令替换，
+        // 不应被结构性否决误伤，仍是 GREEN。
+        assert_eq!(grade("echo '$HOME'", "").level, RiskLevel::Green);
     }
 }

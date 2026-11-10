@@ -44,7 +44,9 @@ pub struct Usage {
 
 impl Usage {
     pub fn total(&self) -> u32 {
-        self.prompt_tokens + self.completion_tokens
+        // Saturating arithmetic: a wrapped u32 would make a huge bill look
+        // tiny and let the task bypass the MAX_TOKENS ceiling.
+        self.prompt_tokens.saturating_add(self.completion_tokens)
     }
 }
 
@@ -142,15 +144,22 @@ async fn map_response_error(resp: reqwest::Response) -> ProviderError {
 /// Parse an SSE byte stream, invoking `on_event` per data line payload.
 /// Bounded by TWO watchdogs (C5): `idle` = max gap between chunks (long
 /// model thinking pauses are normal), `total` = whole-stream wall clock.
+///
+/// `on_event` returns `false` to STOP reading immediately (e.g. on the
+/// `[DONE]` / `message_stop` sentinel). Previously only the closure
+/// returned and `read_sse` kept waiting for more bytes forever.
+/// The returned bool says whether the stream ended on a clean EOF
+/// (`Ok(None)`); callers use it to flag a truncated response.
 async fn read_sse(
     stream: impl futures::Stream<Item = reqwest::Result<bytes::Bytes>>,
-    mut on_event: impl FnMut(&str),
-) -> Result<(), ProviderError> {
+    mut on_event: impl FnMut(&str) -> bool,
+) -> Result<bool, ProviderError> {
     let idle = Duration::from_secs(180); // 3 min between chunks
     let total = Duration::from_secs(600); // 10 min whole stream
     let started = std::time::Instant::now();
     let mut buffer = String::new();
     let mut stream = Box::pin(stream);
+    let mut clean_eof = false; // 是否以对端干净关闭（Ok(None)）结束
     loop {
         match tokio::time::timeout(idle, stream.as_mut().next()).await {
             // Idle watchdog: connection alive but silent too long.
@@ -178,8 +187,9 @@ async fn read_sse(
                     for line in event_text.lines() {
                         if let Some(data) = line.strip_prefix("data:") {
                             let data = data.trim();
-                            if !data.is_empty() {
-                                on_event(data);
+                            if !data.is_empty() && !on_event(data) {
+                                // 回调要求终止：真正停止读取，不再等待后续字节
+                                return Ok(false);
                             }
                         }
                     }
@@ -193,10 +203,25 @@ async fn read_sse(
                 };
                 return Err(ProviderError::StreamInterrupted(detail));
             }
-            Ok(None) => break,
+            Ok(None) => {
+                clean_eof = true; // 对端干净关闭
+                break;
+            }
         }
     }
-    Ok(())
+    // 尾部残留：循环结束时 buffer 可能还剩未以空行结尾的完整 data: 行
+    //（对端关闭前最后一条事件没补空行）。逐行处理，避免丢掉最后一个 delta。
+    if clean_eof {
+        for line in buffer.lines() {
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.trim();
+                if !data.is_empty() && !on_event(data) {
+                    break; // 见到终止哨兵，停止处理尾部残留
+                }
+            }
+        }
+    }
+    Ok(clean_eof)
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +257,11 @@ struct OpenAiChunk {
 #[derive(serde::Deserialize)]
 struct OpenAiChunkChoice {
     delta: OpenAiDelta,
+    /// 仅最后一个 chunk 携带；`length` / `content_filter` 表示被截断，
+    /// 据此把 `ChatOutcome.complete` 置为 false。多数 chunk 没有该字段，
+    /// 故用 `#[serde(default)]` 容错。
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -312,44 +342,76 @@ impl LLMProvider for OpenAIAdapter {
             return Err(map_response_error(resp).await);
         }
 
-        let mut accumulated = String::new();
+        // 1) content 与 reasoning 用两个独立缓冲区，绝不混在一起：
+        //    acc 只收 delta.content（并推给流式 UI），reasoning 只收推理字段。
+        //    这样 find('{')/rfind('}') 不会误取思考过程里的伪 JSON 计划。
+        let mut acc = String::new();
+        let mut reasoning = String::new();
         let mut usage: Option<Usage> = None;
+        let mut finish_reason: Option<String> = None; // 2) 最后一个非 null 的 finish_reason
+        let mut saw_done = false; // 3) 是否见到 [DONE] 终止哨兵
         let stream = resp.bytes_stream();
-        let acc = &mut accumulated;
+        let acc_ref = &mut acc;
+        let reasoning_ref = &mut reasoning;
         let usage_slot = &mut usage;
-        read_sse(stream, |data| {
+        let finish_slot = &mut finish_reason;
+        let done_ref = &mut saw_done;
+        let clean_eof = read_sse(stream, |data| {
             if data == "[DONE]" {
-                return;
+                *done_ref = true;
+                return false; // 3) 真正终止 read_sse，不再空等后续字节
             }
             if let Ok(chunk) = serde_json::from_str::<OpenAiChunk>(data) {
-                if let Some(c) = chunk.choices.first().and_then(|c| c.delta.content.clone()) {
-                    on_chunk(&c);
-                    acc.push_str(&c);
+                if let Some(choice) = chunk.choices.first() {
+                    // 2) 记录最后一个非 null 的 finish_reason
+                    if choice.finish_reason.is_some() {
+                        *finish_slot = choice.finish_reason.clone();
+                    }
+                    // 正式 content：进 acc，并推给流式 UI
+                    if let Some(c) = &choice.delta.content {
+                        on_chunk(c.as_str());
+                        acc_ref.push_str(c);
+                    }
+                    // 推理文本：只进独立缓冲区，绝不进 on_chunk、也不进 acc
+                    if let Some(r) = choice
+                        .delta
+                        .reasoning_content
+                        .as_ref()
+                        .or(choice.delta.reasoning.as_ref())
+                    {
+                        reasoning_ref.push_str(r);
+                    }
                 }
-                // Reasoning models: fold the thinking trace into the parsed
-                // text so a JSON plan hiding inside it is still found.
-                if let Some(r) = chunk
-                    .choices
-                    .first()
-                    .and_then(|c| c.delta.reasoning_content.clone())
-                    .or_else(|| {
-                        chunk
-                            .choices
-                            .first()
-                            .and_then(|c| c.delta.reasoning.clone())
-                    })
-                {
-                    acc.push_str(&r);
-                }
+                // 7) 仅当新的 usage.total() > 0 时覆盖，避免被全 0 的 usage 抹掉
                 if let Some(u) = chunk.usage {
-                    *usage_slot = Some(u);
+                    if u.total() > 0 {
+                        *usage_slot = Some(u);
+                    }
                 }
             }
+            true
         })
         .await?;
+
+        // 1) acc 非空则只用 acc；否则才回退用 reasoning（纯推理模型）
+        let text = if !acc.is_empty() { acc } else { reasoning };
+
+        let mut complete = true;
+        // 2) finish_reason == length / content_filter 表示被截断
+        if matches!(finish_reason.as_deref(), Some("length") | Some("content_filter")) {
+            complete = false;
+        }
+        // 3) 既没见到 [DONE]、又不是对端干净关闭 → 视为中断
+        if !saw_done && !clean_eof {
+            complete = false;
+        }
+        // 6) 空回复且无错误 → 视为未完成
+        if text.is_empty() {
+            complete = false;
+        }
         Ok(ChatOutcome {
-            text: accumulated,
-            complete: true,
+            text,
+            complete,
             usage,
         })
     }
@@ -397,6 +459,13 @@ struct AnthropicDelta {
     #[serde(rename = "type")]
     kind: Option<String>,
     text: Option<String>,
+    /// 扩展思考（thinking_delta）的文本，只进独立 reasoning 缓冲区，
+    /// 绝不混进正式 content，避免污染 JSON 解析。
+    #[serde(default)]
+    thinking: Option<String>,
+    /// message_delta 里的 stop_reason（等价 OpenAI 的 finish_reason）。
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -448,33 +517,101 @@ impl LLMProvider for AnthropicAdapter {
             return Err(map_response_error(resp).await);
         }
 
-        let mut accumulated = String::new();
+        // 1) content 与 reasoning 分离：acc 只收正式 text，reasoning 只收
+        //    扩展思考文本；思考文本绝不进 on_chunk / acc。
+        let mut acc = String::new();
+        let mut reasoning = String::new();
         let mut prompt_tokens: u32 = 0;
         let mut completion_tokens: u32 = 0;
+        let mut stop_reason: Option<String> = None; // 2) 最后一个非 null 的 stop_reason
+        let mut saw_done = false; // 3) 是否见到 message_stop 终止哨兵
+        let mut error_body: Option<String> = None; // 5) 流内 error 事件
         let stream = resp.bytes_stream();
-        let acc = &mut accumulated;
+        let acc_ref = &mut acc;
+        let reasoning_ref = &mut reasoning;
         let pt = &mut prompt_tokens;
         let ct = &mut completion_tokens;
-        read_sse(stream, |data| {
-            if let Ok(chunk) = serde_json::from_str::<AnthropicChunk>(data) {
-                if chunk.kind == "content_block_delta" {
-                    if let Some(text) = chunk.delta.and_then(|d| d.text) {
-                        on_chunk(&text);
-                        acc.push_str(&text);
-                    }
+        let stop_slot = &mut stop_reason;
+        let done_ref = &mut saw_done;
+        let error_slot = &mut error_body;
+        let clean_eof = read_sse(stream, |data| {
+            // 5) 先用 Value 识别控制类事件，兼容各网关的 error / message_stop
+            //    结构差异（例如顶层 type 直接是 overloaded_error）。
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if kind == "error" || kind == "overloaded_error" {
+                    let msg = v
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .or_else(|| {
+                            v.get("error")
+                                .and_then(|e| e.get("type"))
+                                .and_then(|t| t.as_str())
+                        })
+                        .or_else(|| v.get("message").and_then(|m| m.as_str()))
+                        .unwrap_or(kind)
+                        .to_string();
+                    *error_slot = Some(msg);
+                    return false; // 终止读取，随后由 chat_stream 返回 Err
                 }
-                // `message_start` carries the input token count.
-                if let Some(u) = chunk.message.and_then(|m| m.usage) {
-                    *pt = u.input_tokens;
-                    *ct = u.output_tokens;
-                }
-                // `message_delta` carries the final output token count.
-                if let Some(u) = chunk.usage {
-                    *ct = u.output_tokens;
+                if kind == "message_stop" {
+                    *done_ref = true; // 3) 正常终止哨兵
+                    return false;
                 }
             }
+            // 正常数据事件用强类型解析
+            if let Ok(chunk) = serde_json::from_str::<AnthropicChunk>(data) {
+                match chunk.kind.as_str() {
+                    "content_block_delta" => {
+                        if let Some(d) = &chunk.delta {
+                            // 1) 正式 content 进 acc / UI；思考文本只进 reasoning
+                            if d.kind.as_deref() != Some("thinking_delta") {
+                                if let Some(text) = &d.text {
+                                    on_chunk(text.as_str());
+                                    acc_ref.push_str(text);
+                                }
+                            }
+                            if let Some(t) = &d.thinking {
+                                reasoning_ref.push_str(t);
+                            }
+                        }
+                    }
+                    "message_start" => {
+                        // 7) 仅在 usage.total() > 0 时覆盖，避免被全 0 抹掉
+                        if let Some(u) = chunk.message.as_ref().and_then(|m| m.usage.as_ref()) {
+                            if u.input_tokens + u.output_tokens > 0 {
+                                *pt = u.input_tokens;
+                                *ct = u.output_tokens;
+                            }
+                        }
+                    }
+                    "message_delta" => {
+                        // 2) 记录最后一个非 null 的 stop_reason
+                        if let Some(sr) = chunk.delta.as_ref().and_then(|d| d.stop_reason.as_ref()) {
+                            *stop_slot = Some(sr.clone());
+                        }
+                        // 7) 仅在 usage.total() > 0 时覆盖
+                        if let Some(u) = chunk.usage.as_ref() {
+                            if u.input_tokens + u.output_tokens > 0 {
+                                *ct = u.output_tokens;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            true
         })
         .await?;
+
+        // 5) 流内错误事件 → 返回 Err（复用现有 Http 变体，不新增变体）
+        if let Some(body) = error_body {
+            return Err(ProviderError::Http { status: 200, body });
+        }
+
+        // 1) acc 非空则只用 acc；否则才回退用 reasoning
+        let text = if !acc.is_empty() { acc } else { reasoning };
         let usage = if prompt_tokens == 0 && completion_tokens == 0 {
             None
         } else {
@@ -483,9 +620,23 @@ impl LLMProvider for AnthropicAdapter {
                 completion_tokens,
             })
         };
+
+        let mut complete = true;
+        // 2) stop_reason == max_tokens 表示被截断（等价 OpenAI 的 length）
+        if matches!(stop_reason.as_deref(), Some("max_tokens")) {
+            complete = false;
+        }
+        // 3) 既没见到 message_stop、又不是对端干净关闭 → 视为中断
+        if !saw_done && !clean_eof {
+            complete = false;
+        }
+        // 6) 空回复且无错误 → 视为未完成
+        if text.is_empty() {
+            complete = false;
+        }
         Ok(ChatOutcome {
-            text: accumulated,
-            complete: true,
+            text,
+            complete,
             usage,
         })
     }

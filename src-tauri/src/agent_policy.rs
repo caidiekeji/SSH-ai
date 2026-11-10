@@ -72,13 +72,24 @@ pub fn is_assertive(e: Option<&ExpectSpec>) -> bool {
     }
 }
 
-/// True when a spec checks the command OUTPUT (contains / not_contains /
-/// regex). An exit-code-only spec is satisfied by `true` or `echo ok` —
-/// it proves nothing about the goal.
+/// True when a spec makes a POSITIVE claim about the command OUTPUT
+/// (`contains` / `regex`). An exit-code-only spec is satisfied by `true`,
+/// and a `not_contains`-only spec is satisfied by an assertion that can never
+/// fail (`not_contains: ["__NEVER_APPEARS__"]`) — neither proves the goal.
+/// This function is the barrier that decides whether a passing verification
+/// may count as acceptance evidence, so only positive evidence counts.
 pub fn has_output_check(e: &ExpectSpec) -> bool {
-    !e.contains.is_empty()
-        || !e.not_contains.is_empty()
-        || e.regex.as_ref().is_some_and(|r| !r.trim().is_empty())
+    !e.contains.is_empty() || e.regex.as_ref().is_some_and(|r| !r.trim().is_empty())
+}
+
+/// Can this step serve as an ACCEPTANCE CRITERION at all?
+///
+/// A required plan step with nothing but `exit_code: 0` (e.g. command `true`)
+/// is a laundering vector: it would pass trivially and let the gate report
+/// Done without ever checking the goal. Acceptance IDs are therefore derived
+/// only from steps carrying a positive output assertion.
+pub fn is_goal_assertive(e: Option<&ExpectSpec>) -> bool {
+    e.is_some_and(|s| is_assertive(Some(s)) && has_output_check(s))
 }
 
 /// May a passing verification count as goal evidence for the acceptance
@@ -171,11 +182,14 @@ pub fn resolve_acceptance_ids(steps: &[(u32, bool, bool)]) -> Vec<u32> {
 /// The evidence the acceptance verdict is computed from.
 #[derive(Debug, Clone, Default)]
 pub struct AcceptanceState {
-    /// Required steps whose assertions passed.
+    /// Required steps whose assertions passed during Phase 1.
     pub passed_step_ids: HashSet<u32>,
-    /// The reactive phase produced a passing re-check of the goal.
-    pub reactive_verified: bool,
-    /// step_no of the most recent PASSING verification (-1 = none).
+    /// Required steps re-proved by a fresh reactive verification, KEYED BY
+    /// STEP ID. This used to be a single `reactive_verified: bool` that
+    /// short-circuited the whole gate: one re-check laundered every required
+    /// step, and it never reset after a later failure.
+    pub reactive_passed_ids: HashSet<u32>,
+    /// step_no of the most recent PASSING goal evidence (-1 = none).
     pub last_pass_at: i64,
     /// step_no of the most recent FAILED step (-1 = none).
     pub last_fail_at: i64,
@@ -187,8 +201,9 @@ pub struct AcceptanceState {
 ///  1. there IS something to prove against (no assertion → no verdict);
 ///  2. the evidence is FRESH — a verification that happened BEFORE the last
 ///     failure proves nothing (the failed step may have undone it);
-///  3. either every required plan step passed, or the reactive phase
-///     produced a fresh passing verification.
+///  3. EVERY required step has its own passing evidence — either from Phase 1
+///     or from a fresh reactive re-check of that exact step. One verification
+///     can no longer stand in for all the others.
 pub fn is_acceptance_satisfied(acceptance_ids: &[u32], state: &AcceptanceState) -> bool {
     if acceptance_ids.is_empty() {
         return false;
@@ -196,12 +211,9 @@ pub fn is_acceptance_satisfied(acceptance_ids: &[u32], state: &AcceptanceState) 
     if state.last_fail_at >= 0 && state.last_pass_at <= state.last_fail_at {
         return false;
     }
-    if state.reactive_verified {
-        return true;
-    }
-    acceptance_ids
-        .iter()
-        .all(|id| state.passed_step_ids.contains(id))
+    acceptance_ids.iter().all(|id| {
+        state.passed_step_ids.contains(id) || state.reactive_passed_ids.contains(id)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +595,45 @@ pub const RETRYABLE_AI_ERRORS: [&str; 9] = [
     "流式",
 ];
 
+/// English equivalents — providers commonly surface errors verbatim
+/// ("connection timed out", "429 Too Many Requests", "stream interrupted").
+/// Matching only Chinese keywords made those permanent, non-retryable
+/// failures even though they are the most transient ones.
+pub const RETRYABLE_AI_ERRORS_EN: [&str; 14] = [
+    "timeout",
+    "timed out",
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+    "connection reset",
+    "connection refused",
+    "stream interrupted",
+    "broken pipe",
+    "unexpected eof",
+    "temporarily unavailable",
+    "429",
+    "502",
+    "503",
+];
+
+/// Hard failures that must NEVER be retried. Checked FIRST so a message like
+/// "API Key 无效：连接超时" is not retried three times just because it also
+/// happens to contain a transient keyword.
+pub const NON_RETRYABLE_AI_ERRORS: [&str; 12] = [
+    "api key",
+    "apikey",
+    "鉴权",
+    "认证失败",
+    "unauthorized",
+    "invalid api key",
+    "401",
+    "403",
+    "余额",
+    "quota exceeded",
+    "insufficient",
+    "billing",
+];
+
 /// Is this error worth another attempt?
 ///
 /// A malformed model reply counts. The marker is a stable, greppable token
@@ -590,8 +641,44 @@ pub const RETRYABLE_AI_ERRORS: [&str; 9] = [
 /// model's wording; without it here, a model that answers with one sentence
 /// of prose instead of JSON killed the whole task instead of being retried.
 pub fn is_retryable_ai_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    if NON_RETRYABLE_AI_ERRORS
+        .iter()
+        .any(|k| lower.contains(k))
+    {
+        return false;
+    }
     msg.contains(crate::ai::AGENT_REPLY_MALFORMED)
         || RETRYABLE_AI_ERRORS.iter().any(|k| msg.contains(k))
+        || RETRYABLE_AI_ERRORS_EN.iter().any(|k| lower.contains(k))
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn english_transient_errors_are_retryable() {
+        assert!(is_retryable_ai_error("connection timed out"));
+        assert!(is_retryable_ai_error("429 Too Many Requests"));
+        assert!(is_retryable_ai_error("stream interrupted"));
+        assert!(is_retryable_ai_error("HTTP 503 Service Unavailable"));
+    }
+
+    #[test]
+    fn auth_and_billing_errors_are_never_retried() {
+        assert!(!is_retryable_ai_error("API Key 无效：连接超时"));
+        assert!(!is_retryable_ai_error("401 Unauthorized"));
+        assert!(!is_retryable_ai_error("insufficient quota"));
+    }
+
+    #[test]
+    fn malformed_reply_stays_retryable() {
+        assert!(is_retryable_ai_error(&format!(
+            "{} 模型回复无法解析",
+            crate::ai::AGENT_REPLY_MALFORMED
+        )));
+    }
 }
 
 #[cfg(test)]
@@ -638,10 +725,24 @@ mod tests {
         assert!(has_output_check(&spec(None, &["active"])));
         let mut nc = spec(None, &[]);
         nc.not_contains.push("failed".into());
-        assert!(has_output_check(&nc));
+        // A negative-only assertion is vacuously satisfiable — it must NOT
+        // count as positive evidence of the goal.
+        assert!(!has_output_check(&nc));
+        assert!(!is_goal_assertive(Some(&nc)));
         let mut rx = spec(None, &[]);
         rx.regex = Some("ok".into());
         assert!(has_output_check(&rx));
+        assert!(is_goal_assertive(Some(&rx)));
+        assert!(!is_goal_assertive(Some(&spec(Some(0), &[]))));
+    }
+
+    #[test]
+    fn exit_code_only_step_cannot_be_an_acceptance_criterion() {
+        // The laundering vector: a required plan step `true` with only
+        // exit_code: 0 would pass trivially and mark the whole task Done.
+        assert!(!is_goal_assertive(Some(&spec(Some(0), &[]))));
+        assert!(is_goal_assertive(Some(&spec(Some(0), &["active"]))));
+        assert!(!is_goal_assertive(None));
     }
 
     #[test]
@@ -744,15 +845,43 @@ mod tests {
 
     #[test]
     fn acceptance_accepts_a_fresh_reactive_recheck() {
-        // The reactive phase re-checked the goal AFTER the last failure: that
-        // is fresh evidence, even though no required step ever passed.
-        let st = AcceptanceState {
+        // The reactive phase re-checked THIS required step AFTER the last
+        // failure: fresh, per-step evidence.
+        let mut st = AcceptanceState {
             passed_step_ids: HashSet::new(),
-            reactive_verified: true,
             last_pass_at: 9,
             last_fail_at: 3,
+            ..Default::default()
         };
+        st.reactive_passed_ids.insert(1);
         assert!(is_acceptance_satisfied(&[1], &st));
+    }
+
+    #[test]
+    fn one_reactive_recheck_cannot_launder_all_required_steps() {
+        // Regression: the old single `reactive_verified` bool short-circuited
+        // the gate, so re-proving step 1 marked steps 2 and 3 as done too.
+        let mut st = AcceptanceState {
+            last_pass_at: 9,
+            last_fail_at: 3,
+            ..Default::default()
+        };
+        st.reactive_passed_ids.insert(1);
+        assert!(!is_acceptance_satisfied(&[1, 2, 3], &st));
+        st.reactive_passed_ids.insert(2);
+        st.passed_step_ids.insert(3);
+        assert!(is_acceptance_satisfied(&[1, 2, 3], &st));
+    }
+
+    #[test]
+    fn stale_reactive_evidence_does_not_survive_a_later_failure() {
+        let mut st = AcceptanceState {
+            last_pass_at: 3,
+            last_fail_at: 7,
+            ..Default::default()
+        };
+        st.reactive_passed_ids.insert(1);
+        assert!(!is_acceptance_satisfied(&[1], &st));
     }
 
     #[test]
